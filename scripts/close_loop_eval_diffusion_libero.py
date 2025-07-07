@@ -23,7 +23,7 @@ from Dataset_Sim.SimDataset import process_traj_v3
 from moviepy.editor import ImageSequenceClip
 from PIL import Image
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from tqdm import tqdm
+# from tqdm import tqdm
 from transformers import AutoTokenizer, CLIPModel, CLIPProcessor
 from transforms3d.quaternions import mat2quat, quat2mat
 from moviepy.editor import ImageSequenceClip
@@ -373,7 +373,7 @@ def close_loop_eval_libero(
 
         task = task_suite.get_task(task_id)
         initial_states = task_suite.get_task_init_states(task_id)
-        env, task_description = get_libero_env(task, None, resolution = 256, cuda_id=args.local_rank)
+        env, task_description = get_libero_env(task, None, resolution = 256, cuda_id=cuda_id)
 
         model.set_natural_instruction(task_description)
 

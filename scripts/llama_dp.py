@@ -201,7 +201,6 @@ class RobotTransformerNet(nn.Module):
         
         if self.use_action_head_diff in [2]:
             # mlp
-
             self.diffuse_action_head = DenoisingMLP(in_channels=768, out_channels=self.trajectory_dim, num_blocks=3, width=768, num_conds=768)  
         
         elif self.use_action_head_diff == 5:
@@ -246,8 +245,6 @@ class RobotTransformerNet(nn.Module):
         print('scheduler_type', scheduler_type)
         if scheduler_type in [1]:
             self.noise_scheduler = DDPMScheduler(prediction_type = prediction_type,)
-
-            
             # FOR INFERENCE
             self.noise_scheduler_eval = DDIMScheduler(prediction_type = prediction_type,)
             # self.noise_scheduler_eval = self.noise_scheduler
@@ -465,8 +462,6 @@ class RobotTransformerNet(nn.Module):
                     model_output = self.diffuse_action_head(noisy_action_tokens1, feats[:, 0], timestep_tokens.repeat(1, traj_len, 1)[:, 0])
 
                 elif self.use_action_head_diff == 4:
-
-
 
                     b, t, c = noisy_action_tokens.shape
                     noisy_action_tokens1 = F.pad(noisy_action_tokens, (0,self.token_embedding_size -noisy_action_tokens.shape[-1]), mode='constant', value=0)
