@@ -25,10 +25,6 @@ sys.path.append(os.path.join(current_path, "scripts"))
 sys.path.append(os.path.join(current_path, "openvla"))
 print(sys.path)
 
-
-
-
-
 from openvla.prismatic.util.data_utils import PaddedCollatorForActionPrediction
 from openvla.prismatic.vla.datasets.datasets import RLDSDataset
 from openvla.prismatic.util import set_global_seed
@@ -36,8 +32,8 @@ from utils.ddp_utils import init_distributed_mode
 
 import hydra
 import torch
-def get_action_spec(action_spec, DEVICE):
 
+def get_action_spec(action_spec, DEVICE):
     new_action_spec = {}
     for k in action_spec:
         new_action_spec[k] = {}
@@ -47,7 +43,6 @@ def get_action_spec(action_spec, DEVICE):
         if k == "terminate_episode":
             for kk in new_action_spec[k]:
                 new_action_spec[k][kk] = new_action_spec[k][kk].to(torch.int32)
-
     return new_action_spec
 # from Dataset_Sim.SimDataset import SimDataset
 from Dataset_Lab.LabDataset import LabDataset
@@ -397,7 +392,6 @@ def train(cfg: DictConfig):
 
         running_loss = 0.0
         data_start_time = time.time()
-
         iter_start_time = time.time()
         
         print('begin')
@@ -407,12 +401,9 @@ def train(cfg: DictConfig):
 
             obs_new = {}
             obs_new['language_instruction'] = batch['language_instruction']
-            
             obs_new['image'] = batch['pixel_values'].to(DEVICE).clone()
 
-            # print('load_proprio' in cfg)
             if 'load_proprio' in cfg:
-                # import ipdb;ipdb.set_trace()
                 actions = batch["action"][:, :].to(DEVICE).clone()
                 obs_new['poses'] = batch['state'][:, :1, :]
             else:
@@ -424,21 +415,17 @@ def train(cfg: DictConfig):
             loss_mask = batch['loss_weight'].to(DEVICE).clone()
 
             trajectory = actions
-            # if rank == 0 and i % 10 == 0:
-            #     print(actions[0, :])
 
+            # add the noise to the action trajectory
             noise = torch.randn(trajectory.shape, device=trajectory.device)
             bsz = trajectory.shape[0]
-
             timesteps = torch.randint(0, network_module.noise_scheduler.config.num_train_timesteps, (bsz,), device=trajectory.device).long()
-
             noisy_trajectory = network_module.noise_scheduler.add_noise(trajectory, noise, timesteps)
 
 
             inputs = clip_tokenizer(text=obs_new['language_instruction'], return_tensors="pt", max_length=77, padding="max_length", truncation=True)
             for key in inputs:
                 inputs[key] = inputs[key].to(DEVICE)
-
             ccontext = clipmodel.text_model(**inputs)[0].squeeze(0).detach()
             ccontext = ccontext[:, None,...].repeat(1, obs_new['image'].shape[1], 1, 1)
             obs_new['natural_language_embedding'] = ccontext
@@ -467,8 +454,8 @@ def train(cfg: DictConfig):
                 loss = reduce(loss, 'b ... -> b (...)', 'mean')
                 extra_loss = reduce(orig_loss[:, :-cfg.dataset.traj_length], 'b ... -> b (...)', 'mean').detach()
                 # import ipdb;ipdb.set_trace()
-                
                 loss = loss.mean()
+            
             loss_scaler(loss, optimizer)
 
             loss_rota = running_loss[...,3:6].mean()
@@ -477,9 +464,7 @@ def train(cfg: DictConfig):
             # loss_terminate = running_loss[...,8:].mean()
             
             running_loss = running_loss.mean()
-            
             running_loss = reduce_and_average(running_loss)
-
             loss_rota = reduce_and_average(loss_rota)
             loss_world_vector = reduce_and_average(loss_world_vector)
             loss_grip_close = reduce_and_average(loss_grip_close)
@@ -488,9 +473,7 @@ def train(cfg: DictConfig):
                 scheduler.step()
             else:
                 scheduler.step_update(epoch * len(train_dataloader) + i)
-            
-            
-            
+
             # data_time = iter_time - train_time
 
             if rank == 0:
@@ -548,9 +531,6 @@ def train(cfg: DictConfig):
                     cfg = cfg,
                     dataset_statistics = vla_dataset_openx.dataset_statistics,
                 )
-
-
-
 
             total_iter_num += 1
             data_start_time = time.time()

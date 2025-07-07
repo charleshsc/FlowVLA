@@ -274,6 +274,7 @@ class RobotTransformerNet(nn.Module):
         wrist_image = obs["wrist_image"][:, :t-num_pred_action+1] if "wrist_image" in obs else None
         depth_image = obs["depth_image"][:, :t-num_pred_action+1] if "depth_image" in obs else None
 
+        # use the language to query the image feature
         if obs_tokens is None:
             # import ipdb;ipdb.set_trace()
             if reused_context_image_tokens is None:
@@ -314,20 +315,20 @@ class RobotTransformerNet(nn.Module):
             timestep_tokens = self.time_emb(timesteps)
             timestep_tokens = timestep_tokens[:,None,:]
 
-            null_input = torch.zeros([noisy_action_tokens.shape[0], noisy_action_tokens.shape[1], self.token_embedding_size]).to(timestep_tokens.device)
+            
             if self.use_action_head_diff == 4:
                 null_input = torch.empty([0, noisy_action_tokens.shape[1], self.token_embedding_size]).to(timestep_tokens.device)
-
-            if self.use_action_head_diff == 4:
                 full_tokens = torch.cat([context_image_tokens[:, :t-num_pred_action+1].flatten(1, 2),  # TODO remove t-num_pred_action+1
                                 ], axis=-2)
             else:
+                null_input = torch.zeros([noisy_action_tokens.shape[0], noisy_action_tokens.shape[1], self.token_embedding_size]).to(timestep_tokens.device)
                 full_tokens = torch.cat([context_image_tokens[:, :t-num_pred_action+1].flatten(1, 2),  # TODO remove t-num_pred_action+1
                                 null_input[:, :]], axis=-2)
             context_img_len = context_image_tokens[:, :t-num_pred_action+1].flatten(1, 2).shape[1]
             full_tokens = torch.cat([context[:, 0], full_tokens], dim=1)
 
-            
+            # Find the pos of action part
+            # However, if use head_diff == 4, there is no action part
             output_logits_orig = self.transformer(inputs_embeds=full_tokens)[0]
             output_logits = output_logits_orig[:, context[:, 0].shape[1] :, :]
             output_logits = output_logits[:, context_img_len:]
@@ -335,7 +336,6 @@ class RobotTransformerNet(nn.Module):
             
             if self.use_action_head_diff in [2]:
                 # token diffusion head
-                  
                 b, t, c = noisy_action_tokens.shape
                 noisy_action_tokens1 = F.pad(noisy_action_tokens, (0,self.token_embedding_size -noisy_action_tokens.shape[-1]), mode='constant', value=0)
                 output = self.diffuse_action_head(noisy_action_tokens1.flatten(0, 1), output_logits.flatten(0, 1), timestep_tokens.repeat(1, t, 1).flatten(0, 1))
@@ -344,10 +344,8 @@ class RobotTransformerNet(nn.Module):
                 return output.view(b, t, c)
             elif self.use_action_head_diff in [5]:
                 # token diffusion head
-                  
                 b, t, c = noisy_action_tokens.shape
                 noisy_action_tokens_t = noisy_action_tokens.flatten(1,2)
-
                 noisy_action_tokens1 = F.pad(noisy_action_tokens_t, (0,self.token_embedding_size -noisy_action_tokens_t.shape[-1]), mode='constant', value=0)
                 output = self.diffuse_action_head(noisy_action_tokens1, output_logits[:, 0], timestep_tokens.repeat(1, t, 1)[:, 0])
                 if ret_feats:
@@ -355,10 +353,11 @@ class RobotTransformerNet(nn.Module):
                 return output.view(b, t, c)
             else:
                 raise Exception("not implement")
-        elif noisy_action_tokens is not None and timesteps is not None:
-            timestep_tokens = self.time_emb(timesteps)
 
-            timestep_tokens = timestep_tokens[:,None,:]
+        # Directly use the attention to denoise the action
+        # align with the paper
+        elif noisy_action_tokens is not None and timesteps is not None:
+            timestep_tokens = self.time_emb(timesteps)[:,None,:]
 
             if 'REG_FINETUNE' in os.environ:
                 timestep_tokens = torch.zeros_like(timestep_tokens)
@@ -368,9 +367,7 @@ class RobotTransformerNet(nn.Module):
             
             context_img_len = obs_tokens.shape[1]
             
-            full_tokens = torch.cat([obs_tokens,  # TODO remove t-num_pred_action+1
-                                     timestep_tokens, noisy_action_tokens[:, :]], axis=-2)
-
+            full_tokens = torch.cat([obs_tokens, timestep_tokens, noisy_action_tokens[:, :]], axis=-2)
             full_tokens = torch.cat([context[:, 0], full_tokens], dim=1)
 
             if self.attn_implementation == 'eager':
@@ -388,8 +385,6 @@ class RobotTransformerNet(nn.Module):
                 return ret_func(torch.cat([output_logits[:, context_img_len:context_img_len+reg_token_nums], output_logits[:, context_img_len+reg_token_nums+1:]], dim=1), )
             else:
                 return ret_func(output_logits[:, context_img_len+1:])
-
-
 
     # TODO
     @torch.no_grad()
