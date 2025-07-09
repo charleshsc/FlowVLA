@@ -21,6 +21,11 @@ batchfy: False
 shuffle_buffer_size: 64000
 use_action_head_diff: 0
 data_path: 's3://openx'
+use_flow: True
+flow_sampling: 'beta'
+flow_alpha: 1.5
+flow_beta: 1
+flow_sig_min: 0.001
 
 optimizer:
   name: 'adamw'

@@ -48,7 +48,7 @@ class PytorchDiffInference(nn.Module):
     def __init__(self, model, prediction_type='epsilon',sequence_length = 15, 
                  use_wrist_img=False, device="cuda", 
                  stride=1, num_pred_action=4,
-                 use_action_head_diff=0):
+                 use_action_head_diff=0, use_flow=False):
         super().__init__()
 
         self.device = torch.device(device)
@@ -66,6 +66,7 @@ class PytorchDiffInference(nn.Module):
         self.stride = stride
 
         self.model = model
+        self.use_flow = use_flow
 
         print('sequence_length:', self.sequence_length)
         try:
@@ -250,7 +251,12 @@ class PytorchDiffInference(nn.Module):
         with torch.cuda.amp.autocast():
             with torch.no_grad():
                 # 1 x T x L x C
-                if self.use_action_head_diff == 2:
+                if self.use_flow:
+                    if hasattr(self.model, 'module'):
+                        model_output = self.model.module.inferenc_with_flow(obs, num_pred_action=self.num_pred_action, abs_pose=abs_pose, horizon=horizon, reg_prediction_nums=reg_prediction_nums, pad_diff_nums=pad_diff_nums, cfg=cfg)
+                    else:
+                        model_output = self.model.inferenc_with_flow(obs, num_pred_action=self.num_pred_action, abs_pose=abs_pose, horizon=horizon, reg_prediction_nums=reg_prediction_nums, pad_diff_nums=pad_diff_nums, cfg=cfg)
+                elif self.use_action_head_diff == 2:
                     if hasattr(self.model, 'module'):
                         model_output = self.model.module.inference_withfeats(obs, num_pred_action=self.num_pred_action, abs_pose=abs_pose, horizon=horizon, reg_prediction_nums=reg_prediction_nums, pad_diff_nums=pad_diff_nums, cfg=cfg)
                     else:
@@ -328,6 +334,7 @@ def close_loop_eval_libero(
     root_folder = None,
     cfg=None, 
     dataset_statistics = None, 
+    use_flow=False,
 ):
     # import ipdb;ipdb.set_trace()
     if root_folder != None:
@@ -356,6 +363,7 @@ def close_loop_eval_libero(
         num_pred_action = cfg.num_pred_action,
         stride = stride,
         use_action_head_diff = cfg.use_action_head_diff,
+        use_flow=use_flow,
     )
 
     benchmark_dict = benchmark.get_benchmark_dict()
@@ -404,60 +412,53 @@ def close_loop_eval_libero(
 
             while t < max_steps + num_steps_wait:
 
-                # try:
+                if t < num_steps_wait:
+                    obs, reward, done, info = env.step(get_libero_dummy_action(None))
+                    t += 1
+                    continue
+                
+                img = get_libero_image(obs, resize_size)
+                state = np.concatenate(
+                    (obs["robot0_eef_pos"], quat2axisangle(obs["robot0_eef_quat"]), obs["robot0_gripper_qpos"])
+                )
+                state = torch.tensor(state).to(torch.float32)
+                replay_images.append(img)
+                
+                model.set_observation(img)
+                
+                model_output = model.inference(
+                    trajectory_dim = cfg.trajectory_dim, # set trajectory = 7
+                    ret_7 = True,
+                )
+                # import ipdb;ipdb.set_trace()
+                model_output[...,-1] = np.where(model_output[...,-1] > 0.5, np.ones_like(model_output[...,-1]), np.ones_like(model_output[...,-1])*(-1))
+                normalized_actions = model_output
+                action_norm_stats = dataset_statistics[cfg.dataname]['action']
+                mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
+                action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
+                actions = np.where(
+                    mask,
+                    0.5 * (normalized_actions + 1) * (action_high - action_low) + action_low,
+                    normalized_actions,
+                )
+                actions[...,-1] = actions[..., -1] * -1.0
+                
+                # for ii in range(model.num_pred_action):
+                for ii in range(1):
 
-                    if t < num_steps_wait:
-                        obs, reward, done, info = env.step(get_libero_dummy_action(None))
-                        t += 1
-                        continue
-                    
-                    img = get_libero_image(obs, resize_size)
-                    state = np.concatenate(
-                        (obs["robot0_eef_pos"], quat2axisangle(obs["robot0_eef_quat"]), obs["robot0_gripper_qpos"])
-                    )
-                    state = torch.tensor(state).to(torch.float32)
-                    replay_images.append(img)
-                    
-                    model.set_observation(img)
-                    
-                    model_output = model.inference(
-                        trajectory_dim = cfg.trajectory_dim, # set trajectory = 7
-                        ret_7 = True,
-                    )
-                    # import ipdb;ipdb.set_trace()
-                    model_output[...,-1] = np.where(model_output[...,-1] > 0.5, np.ones_like(model_output[...,-1]), np.ones_like(model_output[...,-1])*(-1))
-                    normalized_actions = model_output
-                    action_norm_stats = dataset_statistics[cfg.dataname]['action']
-                    mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
-                    action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
-                    actions = np.where(
-                        mask,
-                        0.5 * (normalized_actions + 1) * (action_high - action_low) + action_low,
-                        normalized_actions,
-                    )
-                    actions[...,-1] = actions[..., -1] * -1.0
-                    
-                    # for ii in range(model.num_pred_action):
-                    for ii in range(1):
+                    action = actions[ii]
 
-                        action = actions[ii]
-
-                        obs, reward, done, info = env.step(action.tolist())
-
-                        if done:
-                            task_successes += 1
-                            total_successes += 1
-                            break
-                        
-                        t += 1
+                    obs, reward, done, info = env.step(action.tolist())
 
                     if done:
+                        task_successes += 1
+                        total_successes += 1
                         break
-                
-                # except Exception as e:
+                    
+                    t += 1
 
-                #     print(f"Caught exception: {e}", flush = True)
-                #     break
+                if done:
+                    break
             
             task_episodes += 1
             total_episodes += 1

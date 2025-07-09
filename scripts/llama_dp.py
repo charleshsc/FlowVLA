@@ -152,6 +152,10 @@ class RobotTransformerNet(nn.Module):
         attn_implementation='eager',
         use_action_head_diff=False,
         vit_forward_version = None,
+        flow_sampling="beta", # beta / uniform
+        flow_alpha=1.5,
+        flow_beta=1,
+        flow_sig_min=0.001,
     ):
         super(RobotTransformerNet, self).__init__()
 
@@ -197,8 +201,6 @@ class RobotTransformerNet(nn.Module):
 
         self.tokens_per_context_image = self.image_tokenizer.tokens_per_context_image
 
-
-        
         if self.use_action_head_diff in [2]:
             # mlp
             self.diffuse_action_head = DenoisingMLP(in_channels=768, out_channels=self.trajectory_dim, num_blocks=3, width=768, num_conds=768)  
@@ -257,6 +259,27 @@ class RobotTransformerNet(nn.Module):
             )
 
             self.noise_scheduler_eval = self.noise_scheduler
+        
+        # flow matching timestep sampling
+        self.flow_sampling = flow_sampling
+        assert self.flow_sampling in [
+            "uniform",
+            "beta",
+        ], f"Invalid flow matching timestep sampling mode: {self.flow_sampling}"
+        if self.flow_sampling == "beta":
+            self.flow_t_max = 1 - flow_sig_min
+            self.flow_beta_dist = torch.distributions.Beta(flow_alpha, flow_beta)
+        self.flow_sig_min=flow_sig_min
+
+    def sample_fm_time(self, bsz: int):
+        if self.flow_sampling == "uniform":  # uniform between 0 and 1
+            """https://github.com/gle-bellier/flow-matching/blob/main/Flow_Matching.ipynb"""
+            eps = 1e-5
+            t = (torch.rand(1) + torch.arange(bsz) / bsz) % (1 - eps)
+        elif self.flow_sampling == "beta":  # from pi0 paper
+            z = self.flow_beta_dist.sample((bsz,))
+            t = self.flow_t_max * (1 - z)  # flip and shift
+        return t
 
     @property
     def attention_scores(self):
@@ -392,21 +415,16 @@ class RobotTransformerNet(nn.Module):
         # for AutoRegressive Inference
         
         wrist_image = obs["wrist_image"] if "wrist_image" in obs else None
-        
         obs["image"] = obs["image"][:, -(self.time_sequence_length-num_pred_action+1):]
         image = obs["image"]
         b = image.shape[0]
         t = self.time_sequence_length + pad_diff_nums
 
-
-
         if horizon == -1:
             cond_data = torch.zeros(size=(b, t,  self.trajectory_dim), device=image.device, dtype=image.dtype)
         else:    
             cond_data = torch.zeros(size=(b, t,  self.trajectory_dim), device=image.device, dtype=image.dtype)
-        # print(cond_data.shape)
 
-        # import ipdb;ipdb.set_trace()
         import torch.nn.functional as F
         trajectory = torch.randn(
             size=cond_data.shape, 
@@ -418,7 +436,6 @@ class RobotTransformerNet(nn.Module):
         self.noise_scheduler_eval.set_timesteps(num_inference_steps)
         feats = None
 
-
         if self.use_action_head_diff == 3:
             t = self.noise_scheduler_eval.timesteps[0].cuda()
             trajectory = self(obs, act=None, obs_tokens=None, act_tokens=None, noisy_action_tokens = trajectory, timesteps=t.repeat(len(trajectory)), num_pred_action=num_pred_action, ret_feats=False)
@@ -429,13 +446,12 @@ class RobotTransformerNet(nn.Module):
             }
             pass
 
-        # print('ddim 100 step, inference_withfeats')
         for t in self.noise_scheduler_eval.timesteps:
             # 1. apply conditioning
             # trajectory[condition_mask] = cond_data[condition_mask]
-            t = t.cuda()
             # 2. predict model output
-            # import ipdb;ipdb.set_trace()
+
+            t = t.cuda()
 
             if reg_prediction_nums > 0:
                 noisy_action_tokens = torch.cat([torch.zeros_like(trajectory[:, :reg_prediction_nums]), trajectory,], dim=1)
@@ -450,26 +466,17 @@ class RobotTransformerNet(nn.Module):
                 timestep_tokens = self.time_emb(t.repeat(len(trajectory)))
                 timestep_tokens = timestep_tokens[:,None,:]
                 if self.use_action_head_diff == 5:
-                    # import ipdb;ipdb.set_trace()
                     noisy_action_tokens_t = noisy_action_tokens.flatten(1,2)
-                    
                     noisy_action_tokens1 = F.pad(noisy_action_tokens_t, (0,self.token_embedding_size -noisy_action_tokens_t.shape[-1]), mode='constant', value=0)
                     model_output = self.diffuse_action_head(noisy_action_tokens1, feats[:, 0], timestep_tokens.repeat(1, traj_len, 1)[:, 0])
-
                 elif self.use_action_head_diff == 4:
-
                     b, t, c = noisy_action_tokens.shape
-                    noisy_action_tokens1 = F.pad(noisy_action_tokens, (0,self.token_embedding_size -noisy_action_tokens.shape[-1]), mode='constant', value=0)
-                    # import ipdb;ipdb.set_trace()
-                    
+                    noisy_action_tokens1 = F.pad(noisy_action_tokens, (0,self.token_embedding_size -noisy_action_tokens.shape[-1]), mode='constant', value=0)                    
                     pad_inp = torch.zeros([noisy_action_tokens.shape[0], noisy_action_tokens.shape[1], self.token_embedding_size]).to(timestep_tokens.device)
-
                     output_logits = torch.cat([feats, pad_inp], dim=1)
                     output = self.diffuse_action_head(noisy_action_tokens1, output_logits, timestep_tokens.repeat(1, t, 1))
                     output = output[:, -noisy_action_tokens.shape[1]:, :]
-
                 else:
-                    # import ipdb;ipdb.set_trace()
                     model_output = self.diffuse_action_head(noisy_action_tokens1.flatten(0, 1), feats.flatten(0, 1), timestep_tokens.repeat(1, traj_len, 1).flatten(0, 1))
                 model_output = model_output.view(b, traj_len, c)
             model_output = model_output[:, :]
@@ -486,7 +493,7 @@ class RobotTransformerNet(nn.Module):
             if horizon == -1:
                 trajectory = self.noise_scheduler_eval.step(model_output, t, trajectory[...,:,:], generator=None,).prev_sample
             else:
-                trajectory = self.noise_scheduler_eval.step(model_output, t, trajectory[..., :,:], generator=None,).prev_sample
+                trajectory = self.noise_scheduler_eval.step(model_output, t, trajectory[...,:,:], generator=None,).prev_sample
         if cfg:
             trajectory = trajectory[:len(trajectory)//2]
         trajectory = trajectory[..., -num_pred_action:, :]
@@ -498,7 +505,6 @@ class RobotTransformerNet(nn.Module):
                     'gripper_closedness_action': trajectory[...,6:7],
                     'terminate_episode': torch.zeros_like(trajectory[...,6:7])  # useless
             }
-
         else:
             return {'world_vector': (trajectory[...,:3] + 1)*0.0768 - 0.0768,
                     'rotation_delta': (trajectory[...,3:7] + 1)*0.0768 - 0.0768,
@@ -506,29 +512,21 @@ class RobotTransformerNet(nn.Module):
                     'terminate_episode': trajectory[...,8:]
             }
 
-
-
-    # TODO
     @torch.no_grad()
     def inference(self, obs: dict, obs_tokens=None, num_pred_action=4, abs_pose=0, horizon=-1, reg_prediction_nums=0, pad_diff_nums=0, cfg=0):
         # for AutoRegressive Inference
         
         wrist_image = obs["wrist_image"] if "wrist_image" in obs else None
-        
         obs["image"] = obs["image"][:, -(self.time_sequence_length-num_pred_action+1):]
         image = obs["image"]
         b = image.shape[0]
         t = self.time_sequence_length + pad_diff_nums
 
-
-
         if horizon == -1:
             cond_data = torch.zeros(size=(b, t,  self.trajectory_dim), device=image.device, dtype=image.dtype)
         else:    
             cond_data = torch.zeros(size=(b, t,  self.trajectory_dim), device=image.device, dtype=image.dtype)
-        # print(cond_data.shape)
 
-        # import ipdb;ipdb.set_trace()
         import torch.nn.functional as F
         trajectory = torch.randn(
             size=cond_data.shape, 
@@ -539,31 +537,27 @@ class RobotTransformerNet(nn.Module):
         num_inference_steps = self.num_inference_steps
         if 'DENOISING_STEPS' in os.environ:
             num_inference_steps = int(os.environ['DENOISING_STEPS'])
-
         self.noise_scheduler_eval.set_timesteps(num_inference_steps)
         img_feats = None
 
-       
         for t in self.noise_scheduler_eval.timesteps:
             # 1. apply conditioning
-            t = t.cuda()
             # 2. predict model output
             
+            t = t.cuda()
 
             if reg_prediction_nums > 0:
                 noisy_action_tokens = torch.cat([torch.zeros_like(trajectory[:, :reg_prediction_nums]), trajectory,], dim=1)
             else:
                 noisy_action_tokens = trajectory
             
-
             if img_feats is None:
-                # if 'DEBUG' in os.environ:
-                #     import ipdb;ipdb.set_trace()
                 model_output, img_feats = self(obs, act=None, obs_tokens=None, act_tokens=None, noisy_action_tokens = noisy_action_tokens,
-                                 timesteps=t.repeat(len(trajectory)), num_pred_action=num_pred_action, ret_feats=True)
+                                timesteps=t.repeat(len(trajectory)), num_pred_action=num_pred_action, ret_feats=True)
             else:
                 model_output = self(obs, act=None, obs_tokens=None, act_tokens=None, noisy_action_tokens = noisy_action_tokens,
-                                 timesteps=t.repeat(len(trajectory)), num_pred_action=num_pred_action, ret_feats=False, reused_context_image_tokens=img_feats)
+                                timesteps=t.repeat(len(trajectory)), num_pred_action=num_pred_action, ret_feats=False, reused_context_image_tokens=img_feats)
+            
             if reg_prediction_nums > 0:
                 model_output = model_output[:, reg_prediction_nums:]
             
@@ -571,17 +565,83 @@ class RobotTransformerNet(nn.Module):
                 noise_pred_uncond, noise_pred_text = model_output.chunk(2)
                 noise_pred = noise_pred_uncond + cfg * (noise_pred_text - noise_pred_uncond)
                 model_output = torch.cat([noise_pred, noise_pred], dim=0)
-            # model_output = network(obs_new, noisy_trajectory=trajectory, timesteps=t)
             b, num, dim = model_output.shape
 
             if horizon == -1:
                 trajectory = self.noise_scheduler_eval.step(model_output, t, trajectory[...,:,:], generator=None,).prev_sample
             else:
-                trajectory = self.noise_scheduler_eval.step(model_output, t, trajectory[..., :,:], generator=None,).prev_sample
-        
+                trajectory = self.noise_scheduler_eval.step(model_output, t, trajectory[...,:,:], generator=None,).prev_sample
         
         if cfg:
             trajectory = trajectory[:len(trajectory)//2]
+        trajectory = trajectory[..., -num_pred_action:, :]
+
+        if self.trajectory_dim == 7:
+            # For OXE
+            return {'world_vector': trajectory[...,:3],
+                    'rotation_delta': trajectory[...,3:6],
+                    'gripper_closedness_action': trajectory[...,6:7],
+                    'terminate_episode': torch.zeros_like(trajectory[...,6:7])  # useless
+            }
+        else:
+            return {'world_vector': (trajectory[...,:3] + 1)*0.0768 - 0.0768,
+                    'rotation_delta': (trajectory[...,3:7] + 1)*0.0768 - 0.0768,
+                    'gripper_closedness_action': trajectory[...,7:8],
+                    'terminate_episode': trajectory[...,8:]
+            }
+    
+    @torch.no_grad()
+    def inferenc_with_flow(self, obs: dict, obs_tokens=None, num_pred_action=4, abs_pose=0, horizon=-1, reg_prediction_nums=0, pad_diff_nums=0, cfg=0):
+        # for AutoRegressive Inference
+        
+        wrist_image = obs["wrist_image"] if "wrist_image" in obs else None
+        obs["image"] = obs["image"][:, -(self.time_sequence_length-num_pred_action+1):]
+        image = obs["image"]
+        b = image.shape[0]
+        t = self.time_sequence_length + pad_diff_nums
+
+        if horizon == -1:
+            cond_data = torch.zeros(size=(b, t,  self.trajectory_dim), device=image.device, dtype=image.dtype)
+        else:    
+            cond_data = torch.zeros(size=(b, t,  self.trajectory_dim), device=image.device, dtype=image.dtype)
+
+        import torch.nn.functional as F
+        trajectory = torch.randn(
+            size=cond_data.shape, 
+            dtype=cond_data.dtype,
+            device=cond_data.device,
+            generator=None)
+
+        num_inference_steps = self.num_inference_steps
+        if 'DENOISING_STEPS' in os.environ:
+            num_inference_steps = int(os.environ['DENOISING_STEPS'])
+        img_feats = None
+        delta_t = 1.0 / num_inference_steps
+        t = torch.zeros(b, device=image.device, dtype=image.dtype)
+
+        for _ in range(num_inference_steps):            
+            t = t.cuda()
+
+            if reg_prediction_nums > 0:
+                noisy_action_tokens = torch.cat([torch.zeros_like(trajectory[:, :reg_prediction_nums]), trajectory,], dim=1)
+            else:
+                noisy_action_tokens = trajectory
+            
+            if img_feats is None:
+                model_output, img_feats = self(obs, act=None, obs_tokens=None, act_tokens=None, noisy_action_tokens = noisy_action_tokens,
+                                timesteps=t.repeat(len(trajectory)), num_pred_action=num_pred_action, ret_feats=True)
+            else:
+                model_output = self(obs, act=None, obs_tokens=None, act_tokens=None, noisy_action_tokens = noisy_action_tokens,
+                                timesteps=t.repeat(len(trajectory)), num_pred_action=num_pred_action, ret_feats=False, reused_context_image_tokens=img_feats)
+            
+            if reg_prediction_nums > 0:
+                model_output = model_output[:, reg_prediction_nums:]
+            
+            b, num, dim = model_output.shape
+
+            trajectory += delta_t * model_output
+            t += delta_t
+
         trajectory = trajectory[..., -num_pred_action:, :]
 
         if self.trajectory_dim == 7:

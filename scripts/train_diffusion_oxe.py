@@ -298,6 +298,10 @@ def train(cfg: DictConfig):
         num_inference_steps=cfg.num_inference_steps,
         attn_implementation=cfg.attn_implementation,
         use_action_head_diff=cfg.use_action_head_diff,
+        flow_sampling=cfg.flow_sampling,
+        flow_alpha=cfg.flow_alpha,
+        flow_beta=cfg.flow_beta,
+        flow_sig_min=cfg.flow_sig_min,
     )
     from transformers import AutoTokenizer, CLIPModel
     clip_tokenizer = AutoTokenizer.from_pretrained(
@@ -415,12 +419,24 @@ def train(cfg: DictConfig):
             loss_mask = batch['loss_weight'].to(DEVICE).clone()
 
             trajectory = actions
-
-            # add the noise to the action trajectory
-            noise = torch.randn(trajectory.shape, device=trajectory.device)
             bsz = trajectory.shape[0]
-            timesteps = torch.randint(0, network_module.noise_scheduler.config.num_train_timesteps, (bsz,), device=trajectory.device).long()
-            noisy_trajectory = network_module.noise_scheduler.add_noise(trajectory, noise, timesteps)
+
+            # Flow matching training
+            def psi_t(x, x1, t):
+                # Conditional Flow
+                t = t[:, None, None] # (B, 1, 1)
+                return (1 - (1 - network_module.flow_sig_min) * t) * x + t * x1
+            
+            if cfg.use_flow:
+                timesteps = network_module.sample_fm_time(bsz).to(trajectory.device)
+                x0 = torch.randn(trajectory.shape, device=trajectory.device)
+                x1 = trajectory
+                noisy_trajectory = psi_t(x0, x1, timesteps)
+            else:
+                # add the noise to the action trajectory
+                noise = torch.randn(trajectory.shape, device=trajectory.device)
+                timesteps = torch.randint(0, network_module.noise_scheduler.config.num_train_timesteps, (bsz,), device=trajectory.device).long()
+                noisy_trajectory = network_module.noise_scheduler.add_noise(trajectory, noise, timesteps)
 
 
             inputs = clip_tokenizer(text=obs_new['language_instruction'], return_tensors="pt", max_length=77, padding="max_length", truncation=True)
@@ -432,22 +448,27 @@ def train(cfg: DictConfig):
 
             with torch.cuda.amp.autocast():
                 pred = network(obs_new, None, noisy_action_tokens=noisy_trajectory,timesteps=timesteps, num_pred_action=cfg.num_pred_action,)
-                if network_module.noise_scheduler.config.prediction_type == 'epsilon':
-                    target = noise
-                elif network_module.noise_scheduler.config.prediction_type == 'sample':
-                    target = trajectory
-                    pass
-                elif network_module.noise_scheduler.config.prediction_type == 'v_prediction':
-                    target = network_module.noise_scheduler.get_velocity(trajectory, noise, timesteps)
-                    pass
+                if cfg.use_flow:
+                    target = x1 - (1 - network_module.flow_sig_min) * x0
+                    loss = F.mse_loss(pred[...,:,:], target[...,:,:], reduction='none')
+                    # loss = torch.mean((pred - target) ** 2)
                 else:
-                    raise ValueError(f"Unsupported prediction type {network_module.noise_scheduler.config.prediction_type}")
-                b, num, dim = pred.shape
-                # import ipdb;ipdb.set_trace()
-                logits = pred
-                loss = F.mse_loss(logits[...,:,:], target[..., :,:, ], reduction='none')
+                    if network_module.noise_scheduler.config.prediction_type == 'epsilon':
+                        target = noise
+                    elif network_module.noise_scheduler.config.prediction_type == 'sample':
+                        target = trajectory
+                        pass
+                    elif network_module.noise_scheduler.config.prediction_type == 'v_prediction':
+                        target = network_module.noise_scheduler.get_velocity(trajectory, noise, timesteps)
+                        pass
+                    else:
+                        raise ValueError(f"Unsupported prediction type {network_module.noise_scheduler.config.prediction_type}")
+                    b, num, dim = pred.shape
+                    # import ipdb;ipdb.set_trace()
+                    logits = pred
+                    loss = F.mse_loss(logits[...,:,:], target[..., :,:, ], reduction='none')
+                
                 orig_loss = loss
-
                 running_loss = loss.detach()
                 from einops import rearrange, reduce
                 loss = loss[loss_mask]
@@ -530,6 +551,7 @@ def train(cfg: DictConfig):
                     root_folder = os.path.join(HydraConfig.get().runtime.cwd, HydraConfig.get().run.dir, "close_loop_videos", f"{total_iter_num}_iters"),
                     cfg = cfg,
                     dataset_statistics = vla_dataset_openx.dataset_statistics,
+                    use_flow = cfg.use_flow,
                 )
 
             total_iter_num += 1
