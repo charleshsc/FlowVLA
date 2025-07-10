@@ -78,3 +78,5 @@ hydra:
   job_logging:
     root:
       level: ERROR 
+    file:
+      enabled: ${oc.env:RANK,0} == "0"

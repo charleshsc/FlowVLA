@@ -399,7 +399,7 @@ class RobotTransformerNet(nn.Module):
             hidden_states = hidden_states[:, context[:, 0].shape[1] :, :]
             def ret_func(x, y):
                 if ret_feats:
-                    return x, y, obs_tokens
+                    return x, y, context_image_tokens, obs_tokens
                 else:
                     return x
             if reg_token_nums > 0:
@@ -460,7 +460,7 @@ class RobotTransformerNet(nn.Module):
                 noisy_action_tokens = trajectory
             
             if feats is None:
-                model_output, feats = self(obs, act=None, obs_tokens=None, act_tokens=None, noisy_action_tokens = noisy_action_tokens, timesteps=t.repeat(len(trajectory)), num_pred_action=num_pred_action, ret_feats=True)
+                model_output, pred_hidden, feats, _ = self(obs, act=None, obs_tokens=None, act_tokens=None, noisy_action_tokens = noisy_action_tokens, timesteps=t.repeat(len(trajectory)), num_pred_action=num_pred_action, ret_feats=True)
             else:
                 b, traj_len, c = noisy_action_tokens.shape
                 noisy_action_tokens1 = F.pad(noisy_action_tokens, (0,self.token_embedding_size -noisy_action_tokens.shape[-1]), mode='constant', value=0)
@@ -553,7 +553,7 @@ class RobotTransformerNet(nn.Module):
                 noisy_action_tokens = trajectory
             
             if img_feats is None:
-                model_output, img_feats = self(obs, act=None, obs_tokens=None, act_tokens=None, noisy_action_tokens = noisy_action_tokens,
+                model_output, pred_hidden, img_feats, _ = self(obs, act=None, obs_tokens=None, act_tokens=None, noisy_action_tokens = noisy_action_tokens,
                                 timesteps=t.repeat(len(trajectory)), num_pred_action=num_pred_action, ret_feats=True)
             else:
                 model_output = self(obs, act=None, obs_tokens=None, act_tokens=None, noisy_action_tokens = noisy_action_tokens,
@@ -629,7 +629,7 @@ class RobotTransformerNet(nn.Module):
                 noisy_action_tokens = trajectory
             
             if img_feats is None:
-                model_output, img_feats = self(obs, act=None, obs_tokens=None, act_tokens=None, noisy_action_tokens = noisy_action_tokens,
+                model_output, pred_hidden, img_feats, _ = self(obs, act=None, obs_tokens=None, act_tokens=None, noisy_action_tokens = noisy_action_tokens,
                                 timesteps=t.repeat(len(trajectory)), num_pred_action=num_pred_action, ret_feats=True)
             else:
                 model_output = self(obs, act=None, obs_tokens=None, act_tokens=None, noisy_action_tokens = noisy_action_tokens,

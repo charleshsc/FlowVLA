@@ -262,14 +262,12 @@ def compute_contrastive_loss(img_hidden, language_hidden, action_hidden, tempera
 
 @hydra.main(version_base=None, config_path=os.path.join(os.path.dirname(__file__), "..", "config"), config_name="config_diffusion_openx")
 def train(cfg: DictConfig):
-
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-
     args = argparse.Namespace()
-    print(args)
+
     init_distributed_mode(args, cfg)
     if 'LOCAL_RANK' in os.environ:
         local_rank = int(os.environ["LOCAL_RANK"])
@@ -407,6 +405,7 @@ def train(cfg: DictConfig):
                 root_folder = os.path.join(HydraConfig.get().runtime.cwd, HydraConfig.get().run.dir, "close_loop_videos", f"{total_iter_num}_iters"),
                 cfg = cfg,
                 dataset_statistics = vla_dataset_openx.dataset_statistics,
+                use_flow = cfg.use_flow,
             )
         exit()
         pass
@@ -417,7 +416,6 @@ def train(cfg: DictConfig):
 
 
     writer = None
-
     if rank == 0:
         if not os.path.exists(checkpoint_path):
             os.makedirs(checkpoint_path, exist_ok=True)
@@ -437,7 +435,6 @@ def train(cfg: DictConfig):
         data_start_time = time.time()
         iter_start_time = time.time()
         
-        print('begin')
         for i, batch in enumerate(train_dataloader):
 
             optimizer.zero_grad()
@@ -486,7 +483,7 @@ def train(cfg: DictConfig):
             obs_new['natural_language_embedding'] = ccontext
 
             with torch.cuda.amp.autocast():
-                pred, pred_hidden, img_hidden = network(obs_new, None, noisy_action_tokens=noisy_trajectory,timesteps=timesteps, num_pred_action=cfg.num_pred_action, ret_feats=True)
+                pred, pred_hidden, _, img_hidden = network(obs_new, None, noisy_action_tokens=noisy_trajectory,timesteps=timesteps, num_pred_action=cfg.num_pred_action, ret_feats=True)
                 language_hidden = ccontext[:, 0]
 
                 if cfg.use_contrastive_loss:
