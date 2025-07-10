@@ -1,8 +1,5 @@
 import os
 
-
-
-
 # os.environ['LD_PRELOAD']='/xxx/xxx/Anonymous/lib/libtcmalloc_minimal.so.4.5.8'
 import argparse
 from dataclasses import dataclass
@@ -218,6 +215,50 @@ def param_groups_weight_decay(model: nn.Module, lr=1e-4, weight_decay=1e-5, no_w
         {"params": pretrained_decay, "weight_decay": weight_decay, "lr": lr * lr_mult},
     ]
 
+def compute_contrastive_loss(img_hidden, language_hidden, action_hidden, temperature=0.1, gamma=0.9):
+    def criterion(x1, x2, label, margin: float = 1.0):
+        dist = torch.nn.functional.pairwise_distance(x1, x2)
+        loss = (1 - label) * torch.pow(dist, 2) + (label) * torch.pow(torch.clamp(margin - dist, min=0.0), 2)
+        loss = torch.mean(loss)
+        return loss
+    
+    img_hidden = img_hidden.mean(dim=1)
+    language_hidden = language_hidden.mean(dim=1)
+
+    B = action_hidden.size(0)  # Batch size
+    T = action_hidden.size(1)  # Time steps
+
+    action_hidden = F.normalize(action_hidden, p=2, dim=-1)  # [B, T, D]
+    img_hidden = F.normalize(img_hidden, p=2, dim=-1)  # [B, D] 
+    language_hidden = F.normalize(language_hidden, p=2, dim=-1)  # [B, D] 
+
+    # Compute all similarities at once using batch matrix multiplication
+    # action_img_sim: [B, T, B] = einsum('btd,bd->btb', action, img)
+    action_img_sim = torch.einsum('btd,cd->btc', action_hidden, img_hidden) / temperature
+    action_lang_sim = torch.einsum('btd,cd->btc', action_hidden, language_hidden) / temperature
+    labels = torch.arange(action_hidden.size(0), device=action_hidden.device)
+    labels = labels.unsqueeze(1).expand(-1, action_hidden.size(1))  # [B, T]
+    
+    loss_img = F.cross_entropy(
+        action_img_sim.flatten(0, 1),  # [B*T, B]
+        labels.flatten(),  # [B*T]
+        reduction='none'
+    ).reshape(B, T)
+    
+    loss_lang = F.cross_entropy(
+        action_lang_sim.flatten(0, 1),  # [B*T, B]
+        labels.flatten(),  # [B*T]
+        reduction='none'
+    ).reshape(B, T)
+
+    weights = torch.pow(gamma, torch.arange(1, T+1, device=action_hidden.device))  # [T]
+    weights = weights.unsqueeze(0)  # [1, T] for broadcasting
+
+    loss = (loss_img + loss_lang) * weights  # [B, T]
+    
+    return loss.unsqueeze(-1)
+
+    
 
 @hydra.main(version_base=None, config_path=os.path.join(os.path.dirname(__file__), "..", "config"), config_name="config_diffusion_openx")
 def train(cfg: DictConfig):
@@ -258,11 +299,9 @@ def train(cfg: DictConfig):
             pixel_values = pixel_values.permute(0, 1, 4, 2, 3)
             del rlds_batch
             return dict(pixel_values=pixel_values, action=action, state=state, dataset_name=dataset_name, language_instruction= lang, loss_weight=loss_weight)
-    data_path = cfg.dataset.data_path
-
-    shuffle_buffer_size = cfg.shuffle_buffer_size
-
     
+    data_path = cfg.dataset.data_path
+    shuffle_buffer_size = cfg.shuffle_buffer_size
     # oxe_magic_soup_plus_minus
     vla_dataset_openx = RLDSDataset(data_path, cfg.dataname, DataAdapterForOpenx(), resize_resolution=(224, 224), shuffle_buffer_size=shuffle_buffer_size, train=True, image_aug=cfg.image_aug if 'image_aug' in cfg else False,
         window_size= cfg.dataset.traj_length + 1 - cfg.num_pred_action, 
@@ -273,6 +312,7 @@ def train(cfg: DictConfig):
     ii = 0
 
     train_dataloader = vla_dataset_openx
+    print(len(train_dataloader)) # 52970
     if args.distributed:
         DEVICE = "cuda:" + str(os.environ["LOCAL_RANK"]) if torch.cuda.is_available() else "cpu"
     else:
@@ -311,7 +351,6 @@ def train(cfg: DictConfig):
 
     params = param_groups_weight_decay(network, lr=cfg.lr, weight_decay=0.05, lr_mult=0.1, pretrained_weight_list=("image_tokenizer.tokenizer",))
 
-    # import ipdb; ipdb.set_trace()
     if cfg.optimizer.name == "adamw":
         optimizer = create_optimizer_v2(
             params, opt=cfg.optimizer.name, lr=cfg.lr, weight_decay=cfg.optimizer.weight_decay, betas=(cfg.optimizer.betas_0, cfg.optimizer.betas_1)
@@ -447,7 +486,12 @@ def train(cfg: DictConfig):
             obs_new['natural_language_embedding'] = ccontext
 
             with torch.cuda.amp.autocast():
-                pred = network(obs_new, None, noisy_action_tokens=noisy_trajectory,timesteps=timesteps, num_pred_action=cfg.num_pred_action,)
+                pred, pred_hidden, img_hidden = network(obs_new, None, noisy_action_tokens=noisy_trajectory,timesteps=timesteps, num_pred_action=cfg.num_pred_action, ret_feats=True)
+                language_hidden = ccontext[:, 0]
+
+                if cfg.use_contrastive_loss:
+                    contrastive_loss = compute_contrastive_loss(img_hidden, language_hidden, pred_hidden, cfg.temperature, cfg.gamma)
+                
                 if cfg.use_flow:
                     target = x1 - (1 - network_module.flow_sig_min) * x0
                     loss = F.mse_loss(pred[...,:,:], target[...,:,:], reduction='none')
@@ -474,8 +518,14 @@ def train(cfg: DictConfig):
                 loss = loss[loss_mask]
                 loss = reduce(loss, 'b ... -> b (...)', 'mean')
                 extra_loss = reduce(orig_loss[:, :-cfg.dataset.traj_length], 'b ... -> b (...)', 'mean').detach()
-                # import ipdb;ipdb.set_trace()
                 loss = loss.mean()
+
+                if cfg.use_contrastive_loss:
+                    contrastive_loss = contrastive_loss[loss_mask]
+                    loss_contrastive = contrastive_loss.detach()
+                    contrastive_loss = reduce(contrastive_loss, 'b ... -> b (...)', 'mean')
+                    loss += cfg.contrastive_loss_weight * contrastive_loss.mean()
+                    
             
             loss_scaler(loss, optimizer)
 
@@ -483,12 +533,14 @@ def train(cfg: DictConfig):
             loss_world_vector = running_loss[...,:3].mean()
             loss_grip_close = running_loss[...,6:8].mean()
             # loss_terminate = running_loss[...,8:].mean()
+            loss_contrastive = loss_contrastive.mean() if cfg.use_contrastive_loss else 0.0
             
             running_loss = running_loss.mean()
             running_loss = reduce_and_average(running_loss)
             loss_rota = reduce_and_average(loss_rota)
             loss_world_vector = reduce_and_average(loss_world_vector)
             loss_grip_close = reduce_and_average(loss_grip_close)
+            loss_contrastive = reduce_and_average(loss_contrastive)
 
             if "use_adjust_scheduler" in cfg and cfg.use_adjust_scheduler:
                 scheduler.step()
@@ -503,14 +555,15 @@ def train(cfg: DictConfig):
                     iter_time = (iter_end_time - iter_start_time) / 10
                     train_time = (iter_end_time - train_start_time)
                     iter_start_time = time.time()
-                    print("[epoch {}, iter {}, iter_time {}, train_time {}, ] lr: {} loss: {}, world_vector:{}, rota:{}, grip:{}, ".
-                        format(epoch + 1, i + 1, iter_time,train_time, optimizer.param_groups[0]["lr"], running_loss, loss_world_vector, loss_rota, loss_grip_close), flush=True)
+                    print("[epoch {}, iter {}, iter_time {}, train_time {}, ] lr: {} loss: {}, world_vector:{}, rota:{}, grip:{}, contrastive: {} ".
+                        format(epoch + 1, i + 1, iter_time,train_time, optimizer.param_groups[0]["lr"], running_loss, loss_world_vector, loss_rota, loss_grip_close, loss_contrastive), flush=True)
 
                 if writer is not None:
                     writer.add_scalar("MSE_loss", running_loss, total_iter_num)
                     writer.add_scalar("MSE_loss_rota", loss_rota, total_iter_num)
                     writer.add_scalar("MSE_loss_world_vector", loss_world_vector, total_iter_num)
                     writer.add_scalar("MSE_loss_grip_close", loss_grip_close, total_iter_num)
+                    writer.add_scalar("MSE_loss_contrastive", loss_contrastive, total_iter_num)
                     # writer.add_scalar("MSE_loss_terminate", loss_terminate, total_iter_num)
             # running_loss = 0.0
             sys.stdout.flush()
@@ -528,6 +581,7 @@ def train(cfg: DictConfig):
                     "iter": i,
                     "total_iter_num": total_iter_num,
                     "loss": running_loss,
+                    "contrastive_loss": loss_contrastive,
                     "loss_scaler": loss_scaler.state_dict(),
                 }
                 print("save checkpoint!", os.path.join(checkpoint_path, f"ckpt_{total_iter_num}.pth"))
@@ -565,6 +619,7 @@ def train(cfg: DictConfig):
         "iter": i,
         "total_iter_num": total_iter_num,
         "loss": running_loss,
+        "contrastive_loss": loss_contrastive,
         "loss_scaler": loss_scaler.state_dict(),
     }
     print("save checkpoint!", os.path.join(checkpoint_path, f"ckpt_{total_iter_num}.pth"))
@@ -578,7 +633,6 @@ if __name__ == "__main__":
     # import subprocess
     # output = subprocess.check_output("scontrol show hostname {} | head -n1".format(SLURM_STEP_NODELIST), shell=True)
     # os.environ['MASTER_ADDR'] = output.strip().decode('ascii')
-
     # for some cluster, you might need this code below
     # import torch.multiprocessing as mp
     # mp.set_start_method('fork', force=True)

@@ -20,6 +20,7 @@ class SinusoidalPosEmb(nn.Module):
         emb = x[:, None] * emb[None, :]
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
+
 class AdaLN(nn.Module):  
     def __init__(self, num_features, num_conds):  
         super(AdaLN, self).__init__()  
@@ -69,24 +70,22 @@ class DenoisingMLP(nn.Module):
         super(DenoisingMLP, self).__init__()  
         if num_conds is None:  
             raise ValueError("num_conds must be specified for the AdaLN layers.")  
-  
         self.blocks = nn.ModuleList([  
             ResidualBlock(in_channels if i == 0 else width, width, num_conds)  
             for i in range(num_blocks)  
         ])  
-  
         if out_channels != width:  
             self.final_linear = nn.Linear(width, out_channels)  
         else:  
             self.final_linear = nn.Identity()  
-  
+
     def forward(self, x, z, t):  
         z = t + z
         for block in self.blocks:  
             x = block(x, z)  
         x = self.final_linear(x)  
         return x  
-  
+
 class AdaLN(nn.Module):
     def __init__(self, num_features, num_conds):
         super(AdaLN, self).__init__()
@@ -112,12 +111,6 @@ def unnormalize(x):
         x[..., i] = x[..., i] * IMAGENET_DEFAULT_STD[i] + IMAGENET_DEFAULT_MEAN[i]
 
     return x
-
-
-
-
-
-
 
 class RobotTransformerNet(nn.Module):
     """A transformer based actor network in PyTorch."""
@@ -226,7 +219,9 @@ class RobotTransformerNet(nn.Module):
                 num_attention_heads=self.token_embedding_size // 64,
                 attention_dropout=0.1,
                 # attn_implementation= attn_implementation,
-                _flash_attn_2_enabled= True if attn_implementation != 'eager' else False
+                _flash_attn_2_enabled= True if attn_implementation != 'eager' else False,
+                output_hidden_states=True,
+                return_dict=True,
                 # dtype=torch.float16
             )
         )
@@ -257,7 +252,6 @@ class RobotTransformerNet(nn.Module):
             num_train_timesteps = 100,
             prediction_type = prediction_type,
             )
-
             self.noise_scheduler_eval = self.noise_scheduler
         
         # flow matching timestep sampling
@@ -394,20 +388,27 @@ class RobotTransformerNet(nn.Module):
             full_tokens = torch.cat([context[:, 0], full_tokens], dim=1)
 
             if self.attn_implementation == 'eager':
-                output_logits = self.transformer(inputs_embeds=full_tokens)[0]
+                outputs = self.transformer(inputs_embeds=full_tokens)
             else:
-                output_logits = self.transformer(inputs_embeds=full_tokens.to(torch.float16))[0]
+                outputs = self.transformer(inputs_embeds=full_tokens.to(torch.float16))
+            
+            output_logits = outputs['logits']
+            hidden_states = outputs['hidden_states'][-1] # tuple of length 13
 
             output_logits = output_logits[:, context[:, 0].shape[1] :, :]
-            def ret_func(x):
+            hidden_states = hidden_states[:, context[:, 0].shape[1] :, :]
+            def ret_func(x, y):
                 if ret_feats:
-                    return x, context_image_tokens
+                    return x, y, obs_tokens
                 else:
                     return x
             if reg_token_nums > 0:
-                return ret_func(torch.cat([output_logits[:, context_img_len:context_img_len+reg_token_nums], output_logits[:, context_img_len+reg_token_nums+1:]], dim=1), )
+                return ret_func(
+                    torch.cat([output_logits[:, context_img_len:context_img_len+reg_token_nums], output_logits[:, context_img_len+reg_token_nums+1:]], dim=1), 
+                    torch.cat([hidden_states[:, context_img_len:context_img_len+reg_token_nums], hidden_states[:, context_img_len+reg_token_nums+1:]], dim=1), 
+                    )
             else:
-                return ret_func(output_logits[:, context_img_len+1:])
+                return ret_func(output_logits[:, context_img_len+1:], hidden_states[:, context_img_len+1:])
 
     # TODO
     @torch.no_grad()

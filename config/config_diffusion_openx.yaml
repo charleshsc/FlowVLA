@@ -2,7 +2,7 @@ epoch: 5000000
 iter_per_epoch: 36000
 task_name: 'dit policy'
 tensorboard_output_dir: ''
-batch_size: 64
+batch_size: 128
 ckpt_path: None
 ckpt_path1: None
 lr: 0.0001
@@ -12,7 +12,7 @@ abs_sup: 0
 num_pred_action: 7
 n_action_steps: 1
 scheduler_type: 0 # diffusion scheduler
-num_inference_steps: 100
+num_inference_steps: 10
 attn_implementation: 'eager'
 add_weight: 0
 use_droid: False
@@ -26,6 +26,10 @@ flow_sampling: 'beta'
 flow_alpha: 1.5
 flow_beta: 1
 flow_sig_min: 0.001
+use_contrastive_loss: True
+temperature: 0.1
+gamma: 0.9
+contrastive_loss_weight: 1.0
 
 optimizer:
   name: 'adamw'
