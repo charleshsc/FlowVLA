@@ -537,7 +537,8 @@ def train(cfg: DictConfig):
             loss_rota = reduce_and_average(loss_rota)
             loss_world_vector = reduce_and_average(loss_world_vector)
             loss_grip_close = reduce_and_average(loss_grip_close)
-            loss_contrastive = reduce_and_average(loss_contrastive)
+            if cfg.use_contrastive_loss:
+                loss_contrastive = reduce_and_average(loss_contrastive)
 
             if "use_adjust_scheduler" in cfg and cfg.use_adjust_scheduler:
                 scheduler.step()
