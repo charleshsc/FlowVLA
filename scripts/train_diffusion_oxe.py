@@ -585,7 +585,7 @@ def train(cfg: DictConfig):
                 print("save checkpoint!", os.path.join(checkpoint_path, f"ckpt_{total_iter_num}.pth"))
                 torch.save(checkpoint, os.path.join(checkpoint_path, f"ckpt_{total_iter_num}.pth"))
                 for item in sorted(os.listdir(checkpoint_path), key=lambda x: os.path.getmtime(os.path.join(checkpoint_path, x)))[:-1]:
-                    if item.endswith('pth'):
+                    if item.endswith('pth') and int(item.split('_')[-1].split('.')[0]) % 10000 != 0:
                         os.system('rm {}'.format(os.path.join(checkpoint_path, item)))
                 
 
