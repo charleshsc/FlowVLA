@@ -226,7 +226,8 @@ def compute_contrastive_loss(img_hidden, language_hidden, action_hidden, tempera
         x1_e = x1.unsqueeze(2).expand(B, T, B, D)
 
         dist = torch.nn.functional.pairwise_distance(x1_e.reshape(-1, D), x2_e.reshape(-1, D), p=2.0, keepdim=False).reshape(B, T, B)
-        loss = (1 - label) * torch.pow(dist, 2) + (label) * torch.pow(torch.clamp(margin - dist, min=0.0), 2)
+        # loss = (1 - label) * torch.pow(dist, 2) + (label) * torch.pow(torch.clamp(margin - dist, min=0.0), 2)
+        loss = label * torch.pow(dist, 2) + (1 - label) * torch.pow(torch.clamp(margin - dist, min=0.0), 2)
         loss = torch.mean(loss, dim=-1)  # [B, T]
         return loss
     

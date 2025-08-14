@@ -2,7 +2,7 @@ epoch: 5000000
 iter_per_epoch: 36000
 task_name: 'dit policy'
 tensorboard_output_dir: ''
-batch_size: 128
+batch_size: 96
 ckpt_path: None
 ckpt_path1: None
 lr: 0.0001
@@ -29,7 +29,7 @@ flow_sig_min: 0.001
 use_contrastive_loss: True
 temperature: 0.1
 gamma: 0.9
-contrastive_loss_weight: 1.0
+contrastive_loss_weight: 0.001
 
 optimizer:
   name: 'adamw'
