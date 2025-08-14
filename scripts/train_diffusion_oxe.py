@@ -217,9 +217,17 @@ def param_groups_weight_decay(model: nn.Module, lr=1e-4, weight_decay=1e-5, no_w
 
 def compute_contrastive_loss(img_hidden, language_hidden, action_hidden, temperature=0.1, gamma=0.9):
     def criterion(x1, x2, label, margin: float = 1.0):
-        dist = torch.nn.functional.pairwise_distance(x1, x2)
+
+        B, T, D = x1.size()  # B: batch size, T: time steps, D: feature dimension
+
+        x2_e = x2.unsqueeze(0).unsqueeze(0)
+        x2_e = x2_e.expand(B, T, B, D)
+
+        x1_e = x1.unsqueeze(2).expand(B, T, B, D)
+
+        dist = torch.nn.functional.pairwise_distance(x1_e.reshape(-1, D), x2_e.reshape(-1, D), p=2.0, keepdim=False).reshape(B, T, B)
         loss = (1 - label) * torch.pow(dist, 2) + (label) * torch.pow(torch.clamp(margin - dist, min=0.0), 2)
-        loss = torch.mean(loss)
+        loss = torch.mean(loss, dim=-1)  # [B, T]
         return loss
     
     img_hidden = img_hidden.mean(dim=1)
@@ -232,24 +240,30 @@ def compute_contrastive_loss(img_hidden, language_hidden, action_hidden, tempera
     img_hidden = F.normalize(img_hidden, p=2, dim=-1)  # [B, D] 
     language_hidden = F.normalize(language_hidden, p=2, dim=-1)  # [B, D] 
 
-    # Compute all similarities at once using batch matrix multiplication
-    # action_img_sim: [B, T, B] = einsum('btd,bd->btb', action, img)
-    action_img_sim = torch.einsum('btd,cd->btc', action_hidden, img_hidden) / temperature
-    action_lang_sim = torch.einsum('btd,cd->btc', action_hidden, language_hidden) / temperature
-    labels = torch.arange(action_hidden.size(0), device=action_hidden.device)
-    labels = labels.unsqueeze(1).expand(-1, action_hidden.size(1))  # [B, T]
+    labels = torch.eye(B, device=action_hidden.device).unsqueeze(1).expand(B, T, B)  # [B, T, B]
+
+    loss_img = criterion(action_hidden, img_hidden, labels)  # [B, T]
+    loss_lang = criterion(action_hidden, language_hidden, labels)  # [B, T]
+
     
-    loss_img = F.cross_entropy(
-        action_img_sim.flatten(0, 1),  # [B*T, B]
-        labels.flatten(),  # [B*T]
-        reduction='none'
-    ).reshape(B, T)
+    # # Compute all similarities at once using batch matrix multiplication
+    # # action_img_sim: [B, T, B] = einsum('btd,bd->btb', action, img)
+    # action_img_sim = torch.einsum('btd,cd->btc', action_hidden, img_hidden) / temperature
+    # action_lang_sim = torch.einsum('btd,cd->btc', action_hidden, language_hidden) / temperature
+    # labels = torch.arange(action_hidden.size(0), device=action_hidden.device)
+    # labels = labels.unsqueeze(1).expand(-1, action_hidden.size(1))  # [B, T]
+
+    # loss_img = F.cross_entropy(
+    #     action_img_sim.flatten(0, 1),  # [B*T, B]
+    #     labels.flatten(),  # [B*T]
+    #     reduction='none'
+    # ).reshape(B, T)
     
-    loss_lang = F.cross_entropy(
-        action_lang_sim.flatten(0, 1),  # [B*T, B]
-        labels.flatten(),  # [B*T]
-        reduction='none'
-    ).reshape(B, T)
+    # loss_lang = F.cross_entropy(
+    #     action_lang_sim.flatten(0, 1),  # [B*T, B]
+    #     labels.flatten(),  # [B*T]
+    #     reduction='none'
+    # ).reshape(B, T)
 
     weights = torch.pow(gamma, torch.arange(1, T+1, device=action_hidden.device))  # [T]
     weights = weights.unsqueeze(0)  # [1, T] for broadcasting
@@ -609,6 +623,11 @@ def train(cfg: DictConfig):
             total_iter_num += 1
             data_start_time = time.time()
 
+            if total_iter_num >= 40001:
+                break
+        if total_iter_num >= 40001:
+            break
+
     checkpoint = {
         "parameter": network_module.state_dict(),
         "optimizer": optimizer.state_dict(),
@@ -622,7 +641,8 @@ def train(cfg: DictConfig):
     }
     print("save checkpoint!", os.path.join(checkpoint_path, f"ckpt_{total_iter_num}.pth"))
     for item in sorted(os.listdir(checkpoint_path), key=lambda x: os.path.getmtime(os.path.join(checkpoint_path, x)))[:]:
-        os.system('rm {}'.format(os.path.join(checkpoint_path, item)))
+        if item.endswith('pth') and int(item.split('_')[-1].split('.')[0]) % 10000 != 0:
+            os.system('rm {}'.format(os.path.join(checkpoint_path, item)))
     torch.save(checkpoint, os.path.join(checkpoint_path, f"ckpt_{total_iter_num}.pth"))
 
 
