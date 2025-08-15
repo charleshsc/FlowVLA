@@ -633,7 +633,7 @@ def close_loop_eval_calvin(
     assert cfg is not None
     print('begin ....', root_folder)
     # import pdb;pdb.set_trace()
-    client = Client()
+    # client = Client()
     np.set_printoptions(suppress=True, precision=3)
 
 
@@ -669,7 +669,7 @@ def close_loop_eval_calvin(
         return env
     model = CustomModel1(model,cfg)
     
-    env = make_env('/xxx/xxx/share_data/Anonymous/task_ABC_D/')
+    env = make_env('/data/wp/task_ABC_D/')
     evaluate_policy(model, env, epoch=0., eval_log_dir=os.path.join(root_folder, 'tmp_'+str(args.rank)), debug=0, rank=args.rank, each_length=test_episodes_num)
 
     return 0, None, 0
