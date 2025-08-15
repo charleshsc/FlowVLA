@@ -448,7 +448,7 @@ def compute_contrastive_loss(img_hidden, language_hidden, action_hidden, tempera
     
     return loss.unsqueeze(-1)
 
-@hydra.main(version_base=None, config_path=os.path.join(os.path.dirname(__file__), "..", "config"), config_name="config_diffusion_nowrist")
+@hydra.main(config_path=os.path.join(os.path.dirname(__file__), "..", "config"), config_name="config_diffusion_nowrist")
 def train(cfg: DictConfig):
 
     torch.backends.cudnn.benchmark = True

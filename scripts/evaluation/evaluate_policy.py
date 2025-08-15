@@ -37,7 +37,7 @@ from calvin_env.envs.play_table_env import get_env
 logger = logging.getLogger(__name__)
 
 EP_LEN = 360
-NUM_SEQUENCES = 1000
+NUM_SEQUENCES = 100
 
 
 def get_epoch(checkpoint):
@@ -97,7 +97,8 @@ def evaluate_policy(model, env, epoch, eval_log_dir=None, debug=False, create_pl
         Dictionary with results
     """
     # import ipdb;ipdb.set_trace()
-    conf_dir = Path(__file__).absolute().parents[2] / "conf"
+    # conf_dir = Path(__file__).absolute().parents[2] / "conf"
+    conf_dir = Path('/home/wp/calvin/calvin_models/conf')
     task_cfg = OmegaConf.load(conf_dir / "callbacks/rollout/tasks/new_playtable_tasks.yaml")
     task_oracle = hydra.utils.instantiate(task_cfg)
     val_annotations = OmegaConf.load(conf_dir / "annotations/new_playtable_validation.yaml")
