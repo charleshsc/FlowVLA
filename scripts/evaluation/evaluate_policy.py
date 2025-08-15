@@ -130,7 +130,7 @@ def evaluate_policy(model, env, epoch, eval_log_dir=None, debug=False, create_pl
         with open(eval_log_dir / 'results_orig_{}.json'.format(rank*each_length+iii), 'w') as file:
             json.dump({'results': result, 'sequences': eval_sequence}, file)    
     with open(eval_log_dir / 'results_orig.json', 'w') as file:
-        json.dump({'results': results, 'sequences': eval_sequences}, file)        
+        json.dump({'results': results, 'sequences': orig_eval_sequences}, file)        
     if create_plan_tsne:
         create_tsne(plans, eval_log_dir, epoch)
     print_and_save(results, eval_sequences, eval_log_dir, epoch)
