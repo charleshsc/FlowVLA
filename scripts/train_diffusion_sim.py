@@ -7,6 +7,12 @@ import subprocess
 import sys
 import time
 
+current_path = os.getcwd()
+sys.path.append(current_path)
+sys.path.append(os.path.join(current_path, "utils/"))
+sys.path.append(os.path.join(current_path, "scripts"))
+sys.path.append(os.path.join(current_path, "openvla"))
+print(sys.path)
 
 from Dataset_VLA.calvin_dataset import CalvinDataset_Policy
 from Dataset_VLA.dataset_calvin import CalvinDataset
@@ -14,11 +20,7 @@ from utils import resume_or_load_checkpoint
 from utils.data_utils import add_noise_to_euler, add_noise_to_quaternion, add_noise_to_translation
 from utils.ddp_utils import init_distributed_mode
 from functools import partial
-current_path = os.getcwd()
-sys.path.append(current_path)
-sys.path.append(os.path.join(current_path, "utils/"))
-sys.path.append(os.path.join(current_path, "../scripts"))
-sys.path.append(os.path.join(current_path, "../openvla"))
+
 # export PYTHONPATH="$(pwd)":"$(pwd)/rt1_pytorch/openx_utils/":"$(pwd)/../":"$(pwd)/../embodied_foundation/rt1_pytorch":$PYTHONPATH
 
 
@@ -388,6 +390,63 @@ def evaluate_act(network, eval_dataloader, DEVICE, tokens_per_context_image,
     
     pass
 
+def compute_contrastive_loss(img_hidden, language_hidden, action_hidden, temperature=0.1, gamma=0.9):
+    def criterion(x1, x2, label, margin: float = 1.0):
+
+        B, T, D = x1.size()  # B: batch size, T: time steps, D: feature dimension
+
+        x2_e = x2.unsqueeze(0).unsqueeze(0)
+        x2_e = x2_e.expand(B, T, B, D)
+
+        x1_e = x1.unsqueeze(2).expand(B, T, B, D)
+
+        dist = torch.nn.functional.pairwise_distance(x1_e.reshape(-1, D), x2_e.reshape(-1, D), p=2.0, keepdim=False).reshape(B, T, B)
+        # loss = (1 - label) * torch.pow(dist, 2) + (label) * torch.pow(torch.clamp(margin - dist, min=0.0), 2)
+        loss = label * torch.pow(dist, 2) + (1 - label) * torch.pow(torch.clamp(margin - dist, min=0.0), 2)
+        loss = torch.mean(loss, dim=-1)  # [B, T]
+        return loss
+    
+    img_hidden = img_hidden.mean(dim=1)
+    language_hidden = language_hidden.mean(dim=1)
+
+    B = action_hidden.size(0)  # Batch size
+    T = action_hidden.size(1)  # Time steps
+
+    action_hidden = F.normalize(action_hidden, p=2, dim=-1)  # [B, T, D]
+    img_hidden = F.normalize(img_hidden, p=2, dim=-1)  # [B, D] 
+    language_hidden = F.normalize(language_hidden, p=2, dim=-1)  # [B, D] 
+
+    labels = torch.eye(B, device=action_hidden.device).unsqueeze(1).expand(B, T, B)  # [B, T, B]
+
+    loss_img = criterion(action_hidden, img_hidden, labels)  # [B, T]
+    loss_lang = criterion(action_hidden, language_hidden, labels)  # [B, T]
+
+    
+    # # Compute all similarities at once using batch matrix multiplication
+    # # action_img_sim: [B, T, B] = einsum('btd,bd->btb', action, img)
+    # action_img_sim = torch.einsum('btd,cd->btc', action_hidden, img_hidden) / temperature
+    # action_lang_sim = torch.einsum('btd,cd->btc', action_hidden, language_hidden) / temperature
+    # labels = torch.arange(action_hidden.size(0), device=action_hidden.device)
+    # labels = labels.unsqueeze(1).expand(-1, action_hidden.size(1))  # [B, T]
+
+    # loss_img = F.cross_entropy(
+    #     action_img_sim.flatten(0, 1),  # [B*T, B]
+    #     labels.flatten(),  # [B*T]
+    #     reduction='none'
+    # ).reshape(B, T)
+    
+    # loss_lang = F.cross_entropy(
+    #     action_lang_sim.flatten(0, 1),  # [B*T, B]
+    #     labels.flatten(),  # [B*T]
+    #     reduction='none'
+    # ).reshape(B, T)
+
+    weights = torch.pow(gamma, torch.arange(1, T+1, device=action_hidden.device))  # [T]
+    weights = weights.unsqueeze(0)  # [1, T] for broadcasting
+
+    loss = (loss_img + loss_lang) * weights  # [B, T]
+    
+    return loss.unsqueeze(-1)
 
 @hydra.main(version_base=None, config_path=os.path.join(os.path.dirname(__file__), "..", "config"), config_name="config_diffusion_nowrist")
 def train(cfg: DictConfig):
@@ -463,7 +522,7 @@ def train(cfg: DictConfig):
             seq_len=2
             act_len = cfg.num_pred_action
         train_dataset = CalvinDataset_Policy(
-            's3://Anonymous/',
+            cfg.dataset.data_path,
             seq_len=seq_len,
             act_len=act_len,
             forward_n_max=25,
@@ -474,7 +533,7 @@ def train(cfg: DictConfig):
             task_num=10000,
             wrap_grmg_data=cfg.wrap_grmg_data)
         eval_dataset = CalvinDataset_Policy(
-            's3://Anonymous/',
+            cfg.dataset.data_path,
             seq_len=seq_len,
             act_len=act_len,
             forward_n_max=25,
@@ -585,6 +644,10 @@ def train(cfg: DictConfig):
         num_inference_steps=cfg.num_inference_steps,
         trajectory_dim=cfg.trajectory_dim,
         vit_forward_version = cfg.model.vit_forward_version if 'vit_forward_version' in cfg.model else None,
+        flow_sampling=cfg.flow_sampling,
+        flow_alpha=cfg.flow_alpha,
+        flow_beta=cfg.flow_beta,
+        flow_sig_min=cfg.flow_sig_min,
     )
 
     params = param_groups_weight_decay(network, lr=cfg.lr, weight_decay=0.05, lr_mult=0.1, pretrained_weight_list=("image_tokenizer.tokenizer",))
@@ -612,7 +675,7 @@ def train(cfg: DictConfig):
         print("use adjust scheduler!!!!!", flush = True)
         lr = cfg.lr
 
-        iter_per_epoch = int(16000.0 / (cfg.batch_size / 64)  / int(os.environ["SLURM_NTASKS"])) 
+        iter_per_epoch = int(16000.0 / (cfg.batch_size / 64)) 
         warm_up_steps = iter_per_epoch * cfg.scheduler.warmup_epochs
         lr_scheduler_configs = {
             'warmup_iters': warm_up_steps,
@@ -714,15 +777,27 @@ def train(cfg: DictConfig):
                     gripper_change_pose = act_new['gripper_change_pose']
                 gripper_change_pose[:, gripper_idx:] = torch.zeros_like(gripper_change_pose[:, gripper_idx:])
 
-            noise = torch.randn(trajectory.shape, device=trajectory.device)
             bsz = trajectory.shape[0]
 
-            timesteps = torch.randint(
-                0, network_module.noise_scheduler.config.num_train_timesteps, 
-                (bsz,), device=trajectory.device
-            ).long()
-
-            noisy_trajectory = network_module.noise_scheduler.add_noise(trajectory, noise, timesteps)
+            # Flow matching training
+            def psi_t(x, x1, t):
+                # Conditional Flow
+                t = t[:, None, None] # (B, 1, 1)
+                return (1 - (1 - network_module.flow_sig_min) * t) * x + t * x1
+            
+            if cfg.use_flow:
+                timesteps = network_module.sample_fm_time(bsz).to(trajectory.device)
+                x0 = torch.randn(trajectory.shape, device=trajectory.device)
+                x1 = trajectory
+                noisy_trajectory = psi_t(x0, x1, timesteps)
+            else:
+                noise = torch.randn(trajectory.shape, device=trajectory.device)
+                timesteps = torch.randint(
+                    0, network_module.noise_scheduler.config.num_train_timesteps, 
+                    (bsz,), device=trajectory.device
+                ).long()
+                noisy_trajectory = network_module.noise_scheduler.add_noise(trajectory, noise, timesteps)
+            
             if 'no_abs_diff' in cfg and cfg.no_abs_diff:
                 noisy_trajectory = torch.cat([torch.zeros_like(trajectory[:, :1]), noisy_trajectory[:, 1:]], dim=1)  
             if 'cat_pose_in_noise' in cfg and cfg.cat_pose_in_noise:
@@ -738,28 +813,38 @@ def train(cfg: DictConfig):
                 ccontext = ccontext[:, None,...].repeat(batch["observation"]['image'].shape[1], obs_new['image'].shape[1], 1, 1)
 
                 obs_new['natural_language_embedding'] = ccontext
+            
             reg_token_nums = int(cfg.abs_sup > 0)
-            pred = network(obs_new, act_new, noisy_action_tokens=noisy_trajectory,timesteps=timesteps, num_pred_action=cfg.num_pred_action,
+            pred, pred_hidden, _, img_hidden = network(obs_new, act_new, noisy_action_tokens=noisy_trajectory,timesteps=timesteps, num_pred_action=cfg.num_pred_action,
                             aug_img_tokens=True if 'aug_img_tokens' in cfg and cfg.aug_img_tokens else False,
-                            reg_token_nums=reg_token_nums)
+                            reg_token_nums=reg_token_nums, ret_feats=True)
+            language_hidden = ccontext[:, 0]
+
+            if cfg.use_contrastive_loss:
+                contrastive_loss = compute_contrastive_loss(img_hidden, language_hidden, pred_hidden, cfg.temperature, cfg.gamma)
 
 
-
-            # (b,t,c,h,w)
-            if network_module.noise_scheduler.config.prediction_type == 'epsilon':
-                target = noise
+            if cfg.use_flow:
+                target = x1 - (1 - network_module.flow_sig_min) * x0
                 if 'no_abs_diff' in cfg and cfg.no_abs_diff:
-                    target = torch.cat([trajectory[:, :1], noise[:, 1:]], dim=1)
+                    target = torch.cat([trajectory[:, :1], target[:, 1:]], dim=1)
+                # loss = F.mse_loss(pred[...,:,:], target[...,:,:], reduction='none')
+                # loss = torch.mean((pred - target) ** 2)
             else:
-                raise ValueError(f"Unsupported prediction type {network_module.noise_scheduler.config.prediction_type}")
+                # (b,t,c,h,w)
+                if network_module.noise_scheduler.config.prediction_type == 'epsilon':
+                    target = noise
+                    if 'no_abs_diff' in cfg and cfg.no_abs_diff:
+                        target = torch.cat([trajectory[:, :1], noise[:, 1:]], dim=1)
+                else:
+                    raise ValueError(f"Unsupported prediction type {network_module.noise_scheduler.config.prediction_type}")
+            
             b, num, dim = pred.shape
             logits = pred[:, reg_token_nums:]
-            
-
             start_loss_action_chunk_idx = 0
-
             loss_mask = loss_mask[...,start_loss_action_chunk_idx:]
             loss = F.mse_loss(logits[..., start_loss_action_chunk_idx:,:], target[..., start_loss_action_chunk_idx:,:, ], reduction='none')
+            
             affordance_loss = 0.
         
             loss = loss[loss_mask]
@@ -825,7 +910,8 @@ def train(cfg: DictConfig):
                 try:
                     torch.save(checkpoint, os.path.join(checkpoint_path, f"ckpt_{total_iter_num}.pth"))
                     for item in sorted(os.listdir(checkpoint_path), key=lambda x: os.path.getmtime(os.path.join(checkpoint_path, x)))[:-1]:
-                        os.system('rm {}'.format(os.path.join(checkpoint_path, item)))
+                        if item.endswith('pth') and int(item.split('_')[-1].split('.')[0]) % 10000 != 0:
+                            os.system('rm {}'.format(os.path.join(checkpoint_path, item)))
                 except Exception as e:
                     print(e)
                     pass
@@ -851,6 +937,12 @@ def train(cfg: DictConfig):
 
             total_iter_num += 1
             data_start_time = time.time()
+            
+            if total_iter_num >= 40001:
+                break
+        
+        if total_iter_num >= 40001:
+            break
 
 def close_loop_eval_ddp(cfg, args, rank, eval_dataset, DEVICE, network, total_iter_num, run_dir, writer,):
     print(args)

@@ -17,6 +17,17 @@ scheduler_type: 0
 cfg: 0
 dataname: 'calvin_mc'
 taskname: 'task_ABC_D'
+wrap_grmg_data: 0
+
+use_flow: True
+flow_sampling: 'beta'
+flow_alpha: 1.5
+flow_beta: 1
+flow_sig_min: 0.001
+use_contrastive_loss: True
+temperature: 0.1
+gamma: 0.9
+contrastive_loss_weight: 0.001
 
 optimizer:
   name: 'adamw'

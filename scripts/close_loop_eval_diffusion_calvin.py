@@ -32,7 +32,8 @@ class PytorchDiffInference(nn.Module):
     def __init__(self, model, prediction_type='epsilon',sequence_length = 15, 
                  use_wrist_img=False, device="cuda", 
                  stride=1, num_pred_action=4,
-                 use_action_head_diff=0):
+                 use_action_head_diff=0,
+                 use_flow=False,):
         super().__init__()
 
         self.device = torch.device(device)
@@ -50,6 +51,7 @@ class PytorchDiffInference(nn.Module):
         self.stride = stride
 
         self.model = model
+        self.use_flow = use_flow
 
         print('sequence_length:', self.sequence_length)
         try:
@@ -249,7 +251,12 @@ class PytorchDiffInference(nn.Module):
         with torch.cuda.amp.autocast():
             with torch.no_grad():
                 # 1 x T x L x C
-                if self.use_action_head_diff == 2:
+                if self.use_flow:
+                    if hasattr(self.model, 'module'):
+                        model_output = self.model.module.inferenc_with_flow(obs, num_pred_action=self.num_pred_action, abs_pose=abs_pose, horizon=horizon, reg_prediction_nums=reg_prediction_nums, pad_diff_nums=pad_diff_nums, cfg=cfg)
+                    else:
+                        model_output = self.model.inferenc_with_flow(obs, num_pred_action=self.num_pred_action, abs_pose=abs_pose, horizon=horizon, reg_prediction_nums=reg_prediction_nums, pad_diff_nums=pad_diff_nums, cfg=cfg)
+                elif self.use_action_head_diff == 2:
                     if hasattr(self.model, 'module'):
                         model_output = self.model.module.inference_withfeats(obs, num_pred_action=self.num_pred_action, abs_pose=abs_pose, horizon=horizon, reg_prediction_nums=reg_prediction_nums, pad_diff_nums=pad_diff_nums, cfg=cfg)
                     else:
@@ -620,6 +627,7 @@ def close_loop_eval_calvin(
     data_root_path = None,
     cfg=None,
     eval_dataset=None,
+    use_flow=False,
 ):
 
     assert cfg is not None
@@ -635,7 +643,8 @@ def close_loop_eval_calvin(
     print('begin 2....')
     print(cfg)
     model = PytorchDiffInference(model=model, sequence_length = cfg.dataset.traj_length, use_wrist_img=cfg.model.use_wrist_img,
-                                 num_pred_action=cfg.num_pred_action, stride=stride, use_action_head_diff=cfg.use_action_head_diff)
+                                 num_pred_action=cfg.num_pred_action, stride=stride, use_action_head_diff=cfg.use_action_head_diff,
+                                 use_flow=use_flow,)
     print('begin init model....')
     print('--------------------')
 
