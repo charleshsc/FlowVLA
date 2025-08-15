@@ -765,7 +765,6 @@ def train(cfg: DictConfig):
 
             train_start_time = time.time()
             
-            
             # normalize 
             trajectory = get_gt_trajectory(cfg, act_new)
             
@@ -823,7 +822,6 @@ def train(cfg: DictConfig):
             if cfg.use_contrastive_loss:
                 contrastive_loss = compute_contrastive_loss(img_hidden, language_hidden, pred_hidden, cfg.temperature, cfg.gamma)
 
-
             if cfg.use_flow:
                 target = x1 - (1 - network_module.flow_sig_min) * x0
                 if 'no_abs_diff' in cfg and cfg.no_abs_diff:
@@ -852,17 +850,25 @@ def train(cfg: DictConfig):
             loss = reduce(loss, 'b ... -> b (...)', 'mean')
             running_loss = loss.detach()
             loss = loss.mean()
+
+            if cfg.use_contrastive_loss:
+                contrastive_loss = contrastive_loss[loss_mask]
+                loss_contrastive = contrastive_loss.detach()
+                contrastive_loss = reduce(contrastive_loss, 'b ... -> b (...)', 'mean')
+                loss += cfg.contrastive_loss_weight * contrastive_loss.mean()
+            
             loss_scaler(loss, optimizer)
 
             loss_rota = running_loss[...,3:gripper_idx].mean()
             loss_world_vector = running_loss[...,:3].mean()
             loss_grip_close = running_loss[...,gripper_idx:gripper_idx+1].mean()
             loss_terminate = running_loss[...,8:].mean()
+            loss_contrastive = loss_contrastive.mean() if cfg.use_contrastive_loss else 0.0
             
             running_loss = running_loss.mean()
-
-
             running_loss = reduce_and_average(running_loss)
+            if cfg.use_contrastive_loss:
+                loss_contrastive = reduce_and_average(loss_contrastive)
 
             if "use_adjust_scheduler" in cfg and cfg.use_adjust_scheduler:
                 scheduler.step()
@@ -876,8 +882,8 @@ def train(cfg: DictConfig):
 
             if rank == 0:
                 if i % 10 == 0:
-                    print("[epoch {}, iter {}, iter_time {}] lr: {} loss: {},  world_vector:{}, rota:{}, grip:{}, terminate:{}, afford: {}".
-                          format(epoch + 1, i + 1, iter_time, optimizer.param_groups[0]["lr"], running_loss, loss_world_vector, loss_rota, loss_grip_close, loss_terminate, affordance_loss), flush=True)
+                    print("[epoch {}, iter {}, iter_time {}] lr: {} loss: {},  world_vector:{}, rota:{}, grip:{}, contrastive: {}, terminate:{}, afford: {}".
+                          format(epoch + 1, i + 1, iter_time, optimizer.param_groups[0]["lr"], running_loss, loss_world_vector, loss_rota, loss_grip_close, loss_contrastive, loss_terminate, affordance_loss), flush=True)
 
                 
                 if writer is not None:
@@ -887,6 +893,7 @@ def train(cfg: DictConfig):
                     writer.add_scalar("MSE_loss_grip_close", loss_grip_close, total_iter_num)
                     writer.add_scalar("MSE_loss_terminate", loss_terminate, total_iter_num)
                     writer.add_scalar('MSE_loss_affordance_loss', affordance_loss, total_iter_num)
+                    writer.add_scalar("MSE_loss_contrastive", loss_contrastive, total_iter_num)
                     
             # running_loss = 0.0
             sys.stdout.flush()
@@ -904,6 +911,7 @@ def train(cfg: DictConfig):
                     "iter": i,
                     "total_iter_num": total_iter_num,
                     "loss": running_loss,
+                    "contrastive_loss": loss_contrastive,
                     "loss_scaler": loss_scaler.state_dict(),
                 }
                 print("save checkpoint!", os.path.join(checkpoint_path, f"ckpt_{total_iter_num}.pth"))
