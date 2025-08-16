@@ -979,24 +979,24 @@ def close_loop_eval_ddp(cfg, args, rank, eval_dataset, DEVICE, network, total_it
         print('begin sync', cfg.n_action_steps)
         print(total_success_rate)
         print(success_num)
-        close_loop_eval_end_time = time.time()
-        total_success_rate = reduce_and_average(torch.tensor(total_success_rate, device=DEVICE))
-        for k in success_num:
-            success_num[k] = reduce_and_sum(torch.tensor(success_num[k], device = DEVICE))
-        print('rate:', total_success_rate, success_num, cfg.close_loop_eval.eval_num)                    
-        if rank == 0:
-            print(f"close_loop_eval success_rate: {total_success_rate}, used_time: {close_loop_eval_end_time - close_loop_eval_start_time}", flush=True)
-            logging.info(f"close_loop_eval success_rate: {total_success_rate}")
+        # close_loop_eval_end_time = time.time()
+        # total_success_rate = reduce_and_average(torch.tensor(total_success_rate, device=DEVICE))
+        # for k in success_num:
+        #     success_num[k] = reduce_and_sum(torch.tensor(success_num[k], device = DEVICE))
+        # print('rate:', total_success_rate, success_num, cfg.close_loop_eval.eval_num)                    
+        # if rank == 0:
+        #     print(f"close_loop_eval success_rate: {total_success_rate}, used_time: {close_loop_eval_end_time - close_loop_eval_start_time}", flush=True)
+        #     logging.info(f"close_loop_eval success_rate: {total_success_rate}")
                     
-            if writer is not None:
-                writer.add_scalar("Close_loop_eval_success_rate", total_success_rate, total_iter_num)
+        #     if writer is not None:
+        #         writer.add_scalar("Close_loop_eval_success_rate", total_success_rate, total_iter_num)
 
-            for k in success_num.keys():
-                if k in cfg.close_loop_eval.eval_num:
-                    print(f"{k} task success rate: {success_num[k] / cfg.close_loop_eval.eval_num[k]}", flush = True)
-                    logging.info(f"{k} task success rate: {success_num[k]/ cfg.close_loop_eval.eval_num[k]}")
-                    if writer is not None:
-                        writer.add_scalar(f"{k} task success rate", success_num[k] / cfg.close_loop_eval.eval_num[k], total_iter_num)
+        #     for k in success_num.keys():
+        #         if k in cfg.close_loop_eval.eval_num:
+        #             print(f"{k} task success rate: {success_num[k] / cfg.close_loop_eval.eval_num[k]}", flush = True)
+        #             logging.info(f"{k} task success rate: {success_num[k]/ cfg.close_loop_eval.eval_num[k]}")
+        #             if writer is not None:
+        #                 writer.add_scalar(f"{k} task success rate", success_num[k] / cfg.close_loop_eval.eval_num[k], total_iter_num)
     except Exception as e:
         import traceback
         traceback.print_exc()
