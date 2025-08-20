@@ -15,7 +15,6 @@ sys.path.append(os.path.join(current_path, "openvla"))
 print(sys.path)
 
 from Dataset_VLA.calvin_dataset import CalvinDataset_Policy
-from Dataset_VLA.dataset_calvin import CalvinDataset
 from utils import resume_or_load_checkpoint
 from utils.data_utils import add_noise_to_euler, add_noise_to_quaternion, add_noise_to_translation
 from utils.ddp_utils import init_distributed_mode
@@ -236,160 +235,6 @@ def param_groups_weight_decay(model: nn.Module, lr=1e-4, weight_decay=1e-5, no_w
         {"params": pretrained_decay, "weight_decay": weight_decay, "lr": lr * lr_mult},
     ]
 
-
-
-def evaluate_act(network, eval_dataloader, DEVICE, tokens_per_context_image, 
-                 tokens_per_step, criterion, writer, args, total_iter_num, noise_scheduler,
-                 generator, num_pred_action, cfg, clipmodel=None, clip_tokenizer=None):
-    with torch.no_grad():
-        network.eval()
-        eval_loss_total = 0.0
-        eval_loss_per_iter = 0.0
-
-        acc_total = 0.0
-        loss_l2_total = 0.0
-        TP_total = 0.0
-        TP_and_FN_total = 0.0
-
-        mse_loss_world_vector_total = 0.0
-        mse_loss_rotation_delta_total = 0.0
-        acc_gripper_closedness_total = 0.0
-        acc_terminate_total = 0.0
-
-        loss_wv_l2_total = 0.0
-        loss_rota_delta_l2_total = 0.0
-        loss_grip_close_l2_total = 0.0
-        loss_term_l2_total = 0.0
-        i = 0
-        gripper_idx = 7
-        if cfg.trajectory_dim == 7:
-            gripper_idx = 6
-        for i, batch in enumerate(eval_dataloader):
-            if i % 50 == 0:
-                print(f"{i}/{len(eval_dataloader)}")
-
-            obs_dict = batch["observation"]
-            act_dict = batch["action"]
-            obs_new = dict_to_gpu(obs_dict, DEVICE)
-            act_new = dict_to_gpu(act_dict, DEVICE)
-            camera_extrinsic_cv = batch["observation"]["camera_extrinsic_cv"].flatten(0, 2).to(DEVICE, non_blocking=True)
-            if cfg.dataset.use_baseframe_action:
-                camera_extrinsic_cv = torch.eye(4).to(DEVICE).unsqueeze(0).repeat(camera_extrinsic_cv.shape[0], 1, 1)
-
-
-
-            trajectory_gt = get_gt_trajectory(cfg, act_new)
-
-            # set_obs_poses(cfg, obs_new, act_new)
-            cond_data = torch.zeros(size=(len(trajectory_gt), trajectory_gt.shape[1], trajectory_gt.shape[-1]), device=DEVICE, dtype=trajectory_gt.dtype)
-
-            if cfg.dataname in ['rlbench', 'calvin', 'calvin_mc', 'metaworld']:
-                inputs = clip_tokenizer(text=batch['instruction'], return_tensors="pt", max_length=77, padding="max_length", truncation=True)
-                for key in inputs:
-                    inputs[key] = inputs[key].to(DEVICE)
-
-                ccontext = clipmodel.text_model(**inputs)[0].squeeze(0).detach()
-                ccontext = ccontext[:, None,...].repeat(batch["observation"]['image'].shape[1], obs_new['image'].shape[1], 1, 1)
-
-                obs_new['natural_language_embedding'] = ccontext            
-            
-            trajectory = torch.randn(
-                size=cond_data.shape, 
-                dtype=cond_data.dtype,
-                device=cond_data.device,
-                generator=None)
-
-            if cfg.dataname in ['calvin', 'rlbench', 'calvin_mc']:
-                if cfg.use_action_head_diff in [2, 4, 5]:
-                    if hasattr(network, 'module'):
-                        model_output = network_module.inference_withfeats(obs_new, num_pred_action=num_pred_action,cfg=0)
-                    else:
-                        model_output = network.inference_withfeats(obs_new, num_pred_action=num_pred_action,cfg=0)
-                else:
-                    if hasattr(network, 'module'):
-                        model_output = network_module.inference(obs_new, num_pred_action=num_pred_action, abs_pose=1, cfg=0) # abs_pose here indicates we do not scale the data.
-                    else:
-                        model_output = network.inference(obs_new, num_pred_action=num_pred_action, abs_pose=1, cfg=0)
-                if cfg.dataname in ['rlbench']:
-                    #  'gripper_closedness_action': trajectory[...,7:8],
-                    # 'terminate_episode': trajectory[...,8:]
-                    output = torch.cat([model_output["world_vector"].cpu(), model_output["rotation_delta"].cpu(),model_output["gripper_closedness_action"].cpu(), model_output["terminate_episode"].cpu(),], dim=-1).cuda()
-                else:
-                    output = torch.cat([model_output["world_vector"].cpu(), model_output["rotation_delta"].cpu(),model_output["gripper_closedness_action"].cpu(),], dim=-1).cuda()
-                trajectory = output
-            else:
-                for t in noise_scheduler.timesteps:
-
-                    model_output = network(obs_new, act_new, noisy_action_tokens=trajectory, 
-                                        timesteps=t.repeat(len(trajectory)), num_pred_action=num_pred_action)
-                    # model_output = network(obs_new, noisy_trajectory=trajectory, timesteps=t)
-                    b, num, dim = model_output.shape
-                    trajectory = noise_scheduler.step(model_output, t, 
-                                                        trajectory[...,:,:], generator=generator,).prev_sample
-                    
-            
-
-
-                trajectory = trajectory[:, -num_pred_action:]
-            trajectory_gt = trajectory_gt[:, -num_pred_action:]
-            
-            eval_loss_per_iter = reduce_and_average(F.mse_loss(trajectory[:, :, :3], trajectory_gt[:, :, :3]))
-            mse_world_vector = reduce_and_average(F.mse_loss(trajectory[:, :, :3], trajectory_gt[:, :, :3]))
-            mse_rotation_delta = reduce_and_average(F.mse_loss(trajectory[:, :, 3:gripper_idx], trajectory_gt[:, :, 3:gripper_idx]))
-            acc_gripper_closedness = calc_acc_and_reduce((trajectory[:, :, gripper_idx] > 0.).float() * 2 - 1, trajectory_gt[:, :, gripper_idx])
-            mse_terminate = reduce_and_average(F.mse_loss(trajectory[:, :, -1] > 0.5, trajectory_gt[:, :, -1]))
-
-            eval_loss_total += eval_loss_per_iter
-
-
-            mse_loss_world_vector_total += mse_world_vector
-            mse_loss_rotation_delta_total += mse_rotation_delta
-            acc_gripper_closedness_total += acc_gripper_closedness
-            acc_terminate_total += mse_terminate
-
-            eval_loss_per_iter = 0
-            if i > 30:
-                break
-
-        eval_loss_total /= i + 1
-        acc_total /= i + 1
-        loss_l2_total /= i + 1
-        TP_total /= i + 1
-        TP_and_FN_total /= i + 1
-
-        mse_loss_world_vector_total /= i + 1
-        mse_loss_rotation_delta_total /= i + 1
-        acc_gripper_closedness_total /= i + 1
-        acc_terminate_total /= i + 1
-
-        # loss_wv_l2_total /= i + 1
-        # loss_grip_close_l2_total /= i + 1
-        # loss_rota_delta_l2_total /= i + 1
-        # loss_term_l2_total /= i + 1
-        print(args.rank)
-        if args.rank == 0:
-
-            print(
-                "EVAL: loss_total: {}, world_vector: {}, rotation_delta: {}, gripper_closedness: {}, Terminate_recall: {}".format(
-                    eval_loss_total, mse_loss_world_vector_total, mse_loss_rotation_delta_total, acc_gripper_closedness_total, acc_terminate_total
-                )
-            )
-            logging.info(
-                "EVAL: loss_total: {}, world_vector: {}, rotation_delta: {}, gripper_closedness: {}, Terminate_recall: {}".format(
-                    acc_total, mse_loss_world_vector_total, mse_loss_rotation_delta_total, acc_gripper_closedness_total, acc_terminate_total
-                )
-            )
-            if writer is not None:
-                # writer.add_scalar("EVAL_MSE_loss", acc_total, total_iter_num)
-                # writer.add_scalar("EVAL_MSELoss", loss_l2, total_iter_num)
-                writer.add_scalar("EVAL_CrossEntropyLoss", eval_loss_total, total_iter_num)
-                writer.add_scalar("EVAL_MSE_WorldVector", mse_loss_world_vector_total, total_iter_num)
-                writer.add_scalar("EVAL_MSE_RotationDelta", mse_loss_rotation_delta_total, total_iter_num)
-                writer.add_scalar("EVAL_Acc_GripperClosed", acc_gripper_closedness_total, total_iter_num)
-                writer.add_scalar("EVAL_Acc_Terminate", acc_terminate_total, total_iter_num)
-    
-    pass
-
 def compute_contrastive_loss(img_hidden, language_hidden, action_hidden, temperature=0.1, gamma=0.9):
     def criterion(x1, x2, label, margin: float = 1.0):
 
@@ -448,7 +293,7 @@ def compute_contrastive_loss(img_hidden, language_hidden, action_hidden, tempera
     
     return loss.unsqueeze(-1)
 
-@hydra.main(config_path=os.path.join(os.path.dirname(__file__), "..", "config"), config_name="config_diffusion_nowrist")
+@hydra.main(config_path=os.path.join(os.path.dirname(__file__), "..", "config"), config_name="config_diffusion_calvin")
 def train(cfg: DictConfig):
 
     torch.backends.cudnn.benchmark = True
@@ -509,15 +354,15 @@ def train(cfg: DictConfig):
         from Dataset_Sim.SimDataset import SimDatasetDumpy 
         train_dataset = SimDatasetDumpy()
         eval_dataset = SimDatasetDumpy()
-    elif cfg.dataname == 'calvin_mc':
+    elif cfg.dataname in ['calvin_mc', 'calvin']:
         if cfg.wrap_grmg_data == 0:
             act_len = cfg.dataset.traj_length + cfg.num_pred_action - 1
             seq_len=cfg.dataset.num_given_observation
-        elif cfg.wrap_grmg_data == 1:
+        elif cfg.wrap_grmg_data == 1: # single image observation
             act_len = cfg.num_pred_action
             seq_len=cfg.dataset.num_given_observation
             seq_len=1
-        elif cfg.wrap_grmg_data == 2:
+        elif cfg.wrap_grmg_data == 2: # two image observation
             seq_len=cfg.dataset.num_given_observation
             seq_len=2
             act_len = cfg.num_pred_action
@@ -543,47 +388,6 @@ def train(cfg: DictConfig):
             use_play=False,
             task_num=10000,
             wrap_grmg_data=cfg.wrap_grmg_data)
-    elif cfg.dataname == 'calvin':
-        # 
-        train_dataset = CalvinDataset(
-            root='s3://Anonymous/{}/training'.format(cfg.taskname),
-            taskvar=[
-                ("A", 0), ("B", 0), ("C", 0), ("D", 0),
-            ],
-            max_episode_length=cfg.dataset.traj_length,
-            cache_size=0,
-            max_episodes_per_task=-1,
-            num_iters=600000,
-            training=True,
-            image_rescale=tuple(
-                float(x) for x in "0.75,1.25".split(",")
-            ),
-            return_low_lvl_trajectory=False,
-            dense_interpolation=1,
-            interpolation_length=20,
-            relative_action=bool(1)
-        )
-        eval_dataset = CalvinDataset(
-            root='s3://Anonymous/{}/validation'.format(cfg.taskname),
-            taskvar=[
-                ("A", 0), ("B", 0), ("C", 0), ("D", 0),
-            ],
-            max_episode_length=cfg.dataset.traj_length,
-            cache_size=0,
-            max_episodes_per_task=-1,
-            num_iters=600000,
-            training=True,
-            image_rescale=tuple(
-                float(x) for x in "0.75,1.25".split(",")
-            ),
-            return_low_lvl_trajectory=False,
-            dense_interpolation=1,
-            interpolation_length=20,
-            relative_action=bool(1)
-        )
-        if 'DEBUG' in os.environ and int(os.environ['DEBUG']) == 2:
-            eval_dataset = train_dataset    
-        print('use calvin')
     else:
         raise("dataset not supported")
 
@@ -689,7 +493,6 @@ def train(cfg: DictConfig):
     total_iter_num = 0
 
     start_epoch, total_iter_num, checkpoint_path, tensorboard_path, log_path, run_dir = resume_or_load_checkpoint(cfg, network, optimizer, scheduler) 
-# tensorboard/embodied/diff_epred_policy_20240415220918/checkpoints/ckpt_12000.pth
     for state in optimizer.state.values():
         for k, v in state.items():
             if isinstance(v, torch.Tensor):
@@ -796,12 +599,6 @@ def train(cfg: DictConfig):
                     (bsz,), device=trajectory.device
                 ).long()
                 noisy_trajectory = network_module.noise_scheduler.add_noise(trajectory, noise, timesteps)
-            
-            if 'no_abs_diff' in cfg and cfg.no_abs_diff:
-                noisy_trajectory = torch.cat([torch.zeros_like(trajectory[:, :1]), noisy_trajectory[:, 1:]], dim=1)  
-            if 'cat_pose_in_noise' in cfg and cfg.cat_pose_in_noise:
-                noisy_trajectory = torch.cat([obs_new['poses'].repeat(1, trajectory.shape[1], 1), noisy_trajectory], dim=-1)
-                obs_new.pop('poses')
 
             if cfg.dataname in ['rlbench', 'calvin','calvin_mc', 'metaworld']:
                 inputs = clip_tokenizer(text=batch['instruction'], return_tensors="pt", max_length=77, padding="max_length", truncation=True)
@@ -824,23 +621,19 @@ def train(cfg: DictConfig):
 
             if cfg.use_flow:
                 target = x1 - (1 - network_module.flow_sig_min) * x0
-                if 'no_abs_diff' in cfg and cfg.no_abs_diff:
-                    target = torch.cat([trajectory[:, :1], target[:, 1:]], dim=1)
                 # loss = F.mse_loss(pred[...,:,:], target[...,:,:], reduction='none')
                 # loss = torch.mean((pred - target) ** 2)
             else:
                 # (b,t,c,h,w)
                 if network_module.noise_scheduler.config.prediction_type == 'epsilon':
                     target = noise
-                    if 'no_abs_diff' in cfg and cfg.no_abs_diff:
-                        target = torch.cat([trajectory[:, :1], noise[:, 1:]], dim=1)
                 else:
                     raise ValueError(f"Unsupported prediction type {network_module.noise_scheduler.config.prediction_type}")
-            
+
             b, num, dim = pred.shape
             logits = pred[:, reg_token_nums:]
             start_loss_action_chunk_idx = 0
-            loss_mask = loss_mask[...,start_loss_action_chunk_idx:]
+            loss_mask = loss_mask[..., start_loss_action_chunk_idx:]
             loss = F.mse_loss(logits[..., start_loss_action_chunk_idx:,:], target[..., start_loss_action_chunk_idx:,:, ], reduction='none')
             
             affordance_loss = 0.
@@ -883,7 +676,7 @@ def train(cfg: DictConfig):
             if rank == 0:
                 if i % 10 == 0:
                     print("[epoch {}, iter {}, iter_time {}] lr: {} loss: {},  world_vector:{}, rota:{}, grip:{}, contrastive: {}, terminate:{}, afford: {}".
-                          format(epoch + 1, i + 1, iter_time, optimizer.param_groups[0]["lr"], running_loss, loss_world_vector, loss_rota, loss_grip_close, loss_contrastive, loss_terminate, affordance_loss), flush=True)
+                        format(epoch + 1, i + 1, iter_time, optimizer.param_groups[0]["lr"], running_loss, loss_world_vector, loss_rota, loss_grip_close, loss_contrastive, loss_terminate, affordance_loss), flush=True)
 
                 
                 if writer is not None:
@@ -926,31 +719,30 @@ def train(cfg: DictConfig):
 
             # *******************************************************#
             # EVAL PART
-
-            # if total_iter_num % 5000 == 0 and total_iter_num != 0 and cfg.dataset.split_type != "overfit":
-
-            #     try:
-            #         evaluate_act(network, eval_dataloader, DEVICE, None, 
-            #                  None, criterion, writer, args, total_iter_num,
-            #                  network_module.noise_scheduler, None, cfg.num_pred_action, cfg, clipmodel=clipmodel, clip_tokenizer=clip_tokenizer)
-            #     except Exception as e:
-            #         import traceback
-            #         traceback.print_exc()
-            #         print(e)
-            #     network.train()
+            # *******************************************************#
 
             if total_iter_num % cfg.close_loop_eval.eval_iters == 0 and total_iter_num != 0 and cfg.use_close_loop_eval : 
-            # if total_iter_num % 5000 == 0 and cfg.use_close_loop_eval : 
                 close_loop_eval_ddp(cfg, args, rank, eval_dataset, DEVICE, network, total_iter_num, run_dir, writer, )
 
             total_iter_num += 1
             data_start_time = time.time()
             
-            if total_iter_num >= 40001:
-                break
-        
-        if total_iter_num >= 40001:
-            break
+    if rank == 0:
+        checkpoint = {
+            "parameter": network_module.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "total_iter_num": total_iter_num,
+            "loss": running_loss,
+            "contrastive_loss": loss_contrastive,
+            "loss_scaler": loss_scaler.state_dict(),
+        }
+        print("save checkpoint!", os.path.join(checkpoint_path, f"ckpt_{total_iter_num}.pth"))
+        try:
+            torch.save(checkpoint, os.path.join(checkpoint_path, f"ckpt_{total_iter_num}.pth"))
+        except Exception as e:
+            print(e)
+            pass
 
 def close_loop_eval_ddp(cfg, args, rank, eval_dataset, DEVICE, network, total_iter_num, run_dir, writer,):
     print(args)

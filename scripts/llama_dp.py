@@ -248,11 +248,15 @@ class RobotTransformerNet(nn.Module):
             print('noise_scheduler_eval', 'ddim')     
         else:
             self.noise_scheduler = DDPMScheduler(
-            beta_schedule = 'squaredcos_cap_v2',
-            num_train_timesteps = 100,
-            prediction_type = prediction_type,
+                beta_schedule = 'squaredcos_cap_v2',
+                num_train_timesteps = 100,
+                prediction_type = prediction_type,
             )
-            self.noise_scheduler_eval = self.noise_scheduler
+            self.noise_scheduler_eval = DDIMScheduler(
+                beta_schedule = 'squaredcos_cap_v2',
+                num_train_timesteps = 100,
+                prediction_type = prediction_type,
+            )
         
         # flow matching timestep sampling
         self.flow_sampling = flow_sampling
@@ -356,15 +360,6 @@ class RobotTransformerNet(nn.Module):
                 b, t, c = noisy_action_tokens.shape
                 noisy_action_tokens1 = F.pad(noisy_action_tokens, (0,self.token_embedding_size -noisy_action_tokens.shape[-1]), mode='constant', value=0)
                 output = self.diffuse_action_head(noisy_action_tokens1.flatten(0, 1), output_logits.flatten(0, 1), timestep_tokens.repeat(1, t, 1).flatten(0, 1))
-                if ret_feats:
-                    return output.view(b, t, c), output_logits
-                return output.view(b, t, c)
-            elif self.use_action_head_diff in [5]:
-                # token diffusion head
-                b, t, c = noisy_action_tokens.shape
-                noisy_action_tokens_t = noisy_action_tokens.flatten(1,2)
-                noisy_action_tokens1 = F.pad(noisy_action_tokens_t, (0,self.token_embedding_size -noisy_action_tokens_t.shape[-1]), mode='constant', value=0)
-                output = self.diffuse_action_head(noisy_action_tokens1, output_logits[:, 0], timestep_tokens.repeat(1, t, 1)[:, 0])
                 if ret_feats:
                     return output.view(b, t, c), output_logits
                 return output.view(b, t, c)

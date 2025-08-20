@@ -70,18 +70,18 @@ class RandomShiftsSingleAug(nn.Module):
 
 class CalvinDataset_Policy(Dataset):
     def __init__(self,
-                 data_dir,
-                 seq_len=10,
-                 act_len=5, 
-                 forward_n_max=25, 
-                 mode='train',
-                 subfolder='task_ABC_D',
-                 use_data_augmentation=True,
-                 task_num=10000,
-                 use_play=True,
-                 use_labeled=True,
-                 wrap_grmg_data=0,
-                 ):
+                data_dir,
+                seq_len=10,
+                act_len=5, 
+                forward_n_max=25, 
+                mode='train',
+                subfolder='task_ABC_D',
+                use_data_augmentation=True,
+                task_num=10000,
+                use_play=True,
+                use_labeled=True,
+                wrap_grmg_data=0,
+                ):
         super().__init__()
         '''
         seq_len: length of observation
@@ -529,7 +529,7 @@ class CalvinDataset_Policy(Dataset):
             pass
         # data['observation']['camera_extrinsic_cv'][:,:,:4,:4] = torch.from_numpy(world2cam)
         return data
-  
+
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
@@ -565,4 +565,4 @@ if __name__ == "__main__":
         task_num=10000,
         wrap_grmg_data=2,
         )
-    
+
