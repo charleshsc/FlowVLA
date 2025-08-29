@@ -429,7 +429,6 @@ def train(cfg: DictConfig):
     L2_loss = torch.nn.MSELoss()
     loss_scaler = NativeScaler()
 
-
     writer = None
     if rank == 0:
         if not os.path.exists(checkpoint_path):

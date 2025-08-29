@@ -453,6 +453,14 @@ def train(cfg: DictConfig):
         flow_beta=cfg.flow_beta,
         flow_sig_min=cfg.flow_sig_min,
     )
+    clipmodel = None
+    if cfg.dataname in ['metaworld', 'calvin', 'calvin_mc']:
+        from transformers import AutoTokenizer, CLIPModel
+        clip_tokenizer = AutoTokenizer.from_pretrained(
+            "openai/clip-vit-large-patch14", use_fast=False
+        )
+        clipmodel = CLIPModel.from_pretrained("openai/clip-vit-large-patch14").to(DEVICE)
+
 
     params = param_groups_weight_decay(network, lr=cfg.lr, weight_decay=0.05, lr_mult=0.1, pretrained_weight_list=("image_tokenizer.tokenizer",))
 
@@ -491,7 +499,6 @@ def train(cfg: DictConfig):
 
     start_epoch = 0
     total_iter_num = 0
-
     start_epoch, total_iter_num, checkpoint_path, tensorboard_path, log_path, run_dir = resume_or_load_checkpoint(cfg, network, optimizer, scheduler) 
     for state in optimizer.state.values():
         for k, v in state.items():
@@ -501,28 +508,20 @@ def train(cfg: DictConfig):
     # network = network.to(DEVICE)
     if args.distributed:
         network = torch.nn.parallel.DistributedDataParallel(network.cuda(local_rank), device_ids=[local_rank], find_unused_parameters=False)
-    else:
-        network = network.to(DEVICE)
-
-    
-    if args.distributed:
         network_module = network.module
     else:
+        network = network.to(DEVICE)
         network_module = network
 
+    if 'eval_only' in cfg and cfg.eval_only:
+        close_loop_eval_ddp(cfg, args, rank, eval_dataset, DEVICE, network, total_iter_num, run_dir, writer, )
+        exit()
+    
     criterion = torch.nn.CrossEntropyLoss()
     L2_loss = torch.nn.MSELoss()
     loss_scaler = NativeScaler()
-    clipmodel = None
-    if cfg.dataname in ['metaworld', 'calvin', 'calvin_mc']:
-        from transformers import AutoTokenizer, CLIPModel
-        clip_tokenizer = AutoTokenizer.from_pretrained(
-            "openai/clip-vit-large-patch14", use_fast=False
-        )
-        clipmodel = CLIPModel.from_pretrained("openai/clip-vit-large-patch14").to(DEVICE)
 
     writer = None
-
     if rank == 0:
         if not os.path.exists(checkpoint_path):
             os.makedirs(checkpoint_path, exist_ok=True)
@@ -531,14 +530,9 @@ def train(cfg: DictConfig):
                 os.makedirs(tensorboard_path, exist_ok=True)
             writer = SummaryWriter(tensorboard_path)
             print(tensorboard_path, 'tensorboard_path')
-        
+        logging.basicConfig(filename=log_path+str(rank), level=logging.INFO, format="%(asctime)s : %(message)s")
         print("Training!", flush=True)
     
-        logging.basicConfig(filename=log_path+str(rank), level=logging.INFO, format="%(asctime)s : %(message)s")
-
-    if 'eval_only' in cfg and cfg.eval_only:
-        close_loop_eval_ddp(cfg, args, rank, eval_dataset, DEVICE, network, total_iter_num, run_dir, writer, )
-        exit()
     network.train()
     import signal, sys
 
@@ -568,9 +562,6 @@ def train(cfg: DictConfig):
 
             train_start_time = time.time()
             
-            # normalize 
-            trajectory = get_gt_trajectory(cfg, act_new)
-            
             loss_mask = torch.sum(act_new['loss_weight'], dim=-1) != 0  # for actions that are beyond input
             if cfg.abs_sup in [3, 4, 5]:
                 if cfg.abs_sup == 4:
@@ -578,7 +569,9 @@ def train(cfg: DictConfig):
                 else:
                     gripper_change_pose = act_new['gripper_change_pose']
                 gripper_change_pose[:, gripper_idx:] = torch.zeros_like(gripper_change_pose[:, gripper_idx:])
-
+            
+            # normalize 
+            trajectory = get_gt_trajectory(cfg, act_new)
             bsz = trajectory.shape[0]
 
             # Flow matching training
@@ -594,20 +587,15 @@ def train(cfg: DictConfig):
                 noisy_trajectory = psi_t(x0, x1, timesteps)
             else:
                 noise = torch.randn(trajectory.shape, device=trajectory.device)
-                timesteps = torch.randint(
-                    0, network_module.noise_scheduler.config.num_train_timesteps, 
-                    (bsz,), device=trajectory.device
-                ).long()
+                timesteps = torch.randint(0, network_module.noise_scheduler.config.num_train_timesteps, (bsz,), device=trajectory.device).long()
                 noisy_trajectory = network_module.noise_scheduler.add_noise(trajectory, noise, timesteps)
 
             if cfg.dataname in ['rlbench', 'calvin','calvin_mc', 'metaworld']:
                 inputs = clip_tokenizer(text=batch['instruction'], return_tensors="pt", max_length=77, padding="max_length", truncation=True)
                 for key in inputs:
                     inputs[key] = inputs[key].to(DEVICE)
-
                 ccontext = clipmodel.text_model(**inputs)[0].squeeze(0).detach()
                 ccontext = ccontext[:, None,...].repeat(batch["observation"]['image'].shape[1], obs_new['image'].shape[1], 1, 1)
-
                 obs_new['natural_language_embedding'] = ccontext
             
             reg_token_nums = int(cfg.abs_sup > 0)
@@ -634,7 +622,7 @@ def train(cfg: DictConfig):
             logits = pred[:, reg_token_nums:]
             start_loss_action_chunk_idx = 0
             loss_mask = loss_mask[..., start_loss_action_chunk_idx:]
-            loss = F.mse_loss(logits[..., start_loss_action_chunk_idx:,:], target[..., start_loss_action_chunk_idx:,:, ], reduction='none')
+            loss = F.mse_loss(logits[..., start_loss_action_chunk_idx:,:], target[..., start_loss_action_chunk_idx:,:], reduction='none')
             
             affordance_loss = 0.
         
