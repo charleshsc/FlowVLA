@@ -230,6 +230,42 @@ def compute_contrastive_loss(img_hidden, language_hidden, action_hidden, tempera
         loss = label * torch.pow(dist, 2) + (1 - label) * torch.pow(torch.clamp(margin - dist, min=0.0), 2)
         loss = torch.mean(loss, dim=-1)  # [B, T]
         return loss
+
+    def criterion2(x1: torch.Tensor,
+                            x2: torch.Tensor,
+                            label: torch.Tensor,
+                            margin: float = 1.0,
+                            reduction: str = "mean") -> torch.Tensor:
+
+        B, D = x1.shape
+
+        # 计算两两欧氏距离矩阵 [B, B]
+        # 方法1：直接广播差值再范数（内存友好度较好）
+        # diff = x1[:, None, :] - x2[None, :, :]  # [B, B, D]
+        # dist = torch.linalg.norm(diff, ord=2, dim=-1)  # [B, B]
+
+        # 方法2：用平方范数展开（更省内存）
+        x1_sq = (x1 * x1).sum(dim=1, keepdim=True)        # [B, 1]
+        x2_sq = (x2 * x2).sum(dim=1, keepdim=True).T      # [1, B]
+        # dist^2 = ||x1||^2 + ||x2||^2 - 2 x1 x2^T
+        dist_sq = torch.clamp(x1_sq + x2_sq - 2.0 * (x1 @ x2.T), min=0.0)  # 数值稳定
+        dist = torch.sqrt(dist_sq + 1e-12)  # 加小常数防止梯度NaN
+
+        # Contrastive loss:
+        # positive (label=1):  L_pos = d^2
+        # negative (label=0):  L_neg = max(0, margin - d)^2
+        pos_loss = label * dist_sq
+        neg_loss = (1.0 - label) * torch.clamp(margin - dist, min=0.0).pow(2)
+        loss_mat = pos_loss + neg_loss  # [B, B]
+
+        if reduction == "none":
+            return loss_mat
+        elif reduction == "mean":
+            return loss_mat.mean()
+        elif reduction == "sum":
+            return loss_mat.sum()
+        else:
+            raise ValueError(f"Unsupported reduction: {reduction}")
     
     img_hidden = img_hidden.mean(dim=1)
     language_hidden = language_hidden.mean(dim=1)
@@ -246,7 +282,15 @@ def compute_contrastive_loss(img_hidden, language_hidden, action_hidden, tempera
     loss_img = criterion(action_hidden, img_hidden, labels)  # [B, T]
     loss_lang = criterion(action_hidden, language_hidden, labels)  # [B, T]
 
+    # Ablation for image + language alignment
+    # loss_img_lang = criterion2(img_hidden, language_hidden, torch.eye(B, device=action_hidden.device))
+
+    # Ablation for image
+    # loss_img = 0
+    # loss_lang = 0
+
     
+    # Ablation for Loss Function
     # # Compute all similarities at once using batch matrix multiplication
     # # action_img_sim: [B, T, B] = einsum('btd,bd->btb', action, img)
     # action_img_sim = torch.einsum('btd,cd->btc', action_hidden, img_hidden) / temperature
