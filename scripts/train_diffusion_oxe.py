@@ -407,6 +407,18 @@ def train(cfg: DictConfig):
     clipmodel = CLIPModel.from_pretrained("openai/clip-vit-large-patch14").to(DEVICE)
 
     params = param_groups_weight_decay(network, lr=cfg.lr, weight_decay=0.05, lr_mult=0.1, pretrained_weight_list=("image_tokenizer.tokenizer",))
+    # params += param_groups_weight_decay(
+    #     clipmodel,
+    #     lr=cfg.lr,
+    #     weight_decay=0.05,
+    #     lr_mult=0.1,
+    #     # 这些关键字能匹配到 CLIP 的文本/视觉干路与投影头
+    #     pretrained_weight_list=(
+    #         "vision_model", "text_model", "visual_projection", "text_projection", "logit_scale"
+    #     ),
+    #     # 可选：显式把 logit_scale 放到 no-wd（你的函数本来对 ndim<=1 已经不加 wd 了）
+    #     no_weight_decay_list=("logit_scale",)
+    # )
 
     if cfg.optimizer.name == "adamw":
         optimizer = create_optimizer_v2(
@@ -443,6 +455,8 @@ def train(cfg: DictConfig):
         for k, v in state.items():
             if isinstance(v, torch.Tensor):
                 state[k] = v.to(DEVICE)
+    # Set the number of inference steps for evaluation
+    network.num_inference_steps=cfg.num_inference_steps
 
     if args.distributed:
         network = torch.nn.parallel.DistributedDataParallel(network.cuda(local_rank), device_ids=[local_rank], find_unused_parameters=False)

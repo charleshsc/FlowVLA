@@ -192,6 +192,10 @@ class RobotTransformerNet(nn.Module):
             vit_forward_version = None,
         )
 
+        # ablation for image tokenizer
+        # for p in self.image_tokenizer.parameters():
+        #     p.requires_grad_(False)
+
         self.tokens_per_context_image = self.image_tokenizer.tokens_per_context_image
 
         if self.use_action_head_diff in [2]:
