@@ -406,7 +406,26 @@ class RobotTransformerNet(nn.Module):
                     torch.cat([output_logits[:, context_img_len:context_img_len+reg_token_nums], output_logits[:, context_img_len+reg_token_nums+1:]], dim=1), 
                     torch.cat([hidden_states[:, context_img_len:context_img_len+reg_token_nums], hidden_states[:, context_img_len+reg_token_nums+1:]], dim=1), 
                     )
+                # Ablation for the save alignment visualization
+                # json_dict = {
+                #     "language_embedding": context[:, 0],
+                #     "image_embedding": obs_tokens,
+                #     "action_embedding": torch.cat([hidden_states[:, context_img_len:context_img_len+reg_token_nums], hidden_states[:, context_img_len+reg_token_nums+1:]], dim=1), 
+                # }
+                # from datetime import datetime
+                # timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                # filename = f"/ailab/user/zhouxiao/hsc/VLA/Dita/outputs/cons/timestep_{timestamp}.pt"
+                # torch.save(json_dict, filename)
             else:
+                # json_dict = {
+                #     "language_embedding": context[:, 0],
+                #     "image_embedding": obs_tokens,
+                #     "action_embedding": hidden_states[:, context_img_len+1:], 
+                # }
+                # from datetime import datetime
+                # timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                # filename = f"/ailab/user/zhouxiao/hsc/VLA/Dita/outputs/cons/timestep_{timestamp}.pt"
+                # torch.save(json_dict, filename)
                 return ret_func(output_logits[:, context_img_len+1:], hidden_states[:, context_img_len+1:])
 
     # TODO
